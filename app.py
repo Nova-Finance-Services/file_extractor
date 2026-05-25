@@ -706,7 +706,6 @@ def extract_base64():
                 logger.warning(f"Failed to delete temp file {file_path}: {str(e)}")
 
 @app.route('/test-celery', methods=['GET', 'POST'])
-@require_api_key
 def test_celery():
     """Enqueue a test Celery task to verify Redis + worker are connected."""
     try:
@@ -744,7 +743,6 @@ def test_celery():
 
 
 @app.route('/test-celery/<task_id>', methods=['GET'])
-@require_api_key
 def test_celery_status(task_id):
     """Poll result of a test Celery task by task id."""
     try:
