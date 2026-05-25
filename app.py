@@ -705,6 +705,70 @@ def extract_base64():
             except Exception as e:
                 logger.warning(f"Failed to delete temp file {file_path}: {str(e)}")
 
+@app.route('/test-celery', methods=['GET', 'POST'])
+@require_api_key
+def test_celery():
+    """Enqueue a test Celery task to verify Redis + worker are connected."""
+    try:
+        from tasks import process_item
+    except ImportError as exc:
+        logger.error("Celery tasks not available: %s", exc)
+        return jsonify({'error': 'Celery is not configured on this server'}), 503
+
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        item_id = data.get('id') or data.get('item_id')
+    else:
+        item_id = request.args.get('id') or request.args.get('item_id')
+
+    if not item_id:
+        item_id = 'test'
+
+    try:
+        async_result = process_item.delay(item_id)
+    except Exception as exc:
+        logger.error("Failed to enqueue Celery task: %s", exc, exc_info=True)
+        return jsonify({
+            'error': 'Failed to enqueue task. Check CELERY_BROKER_URL / REDIS_URL and Redis.',
+            'details': str(exc),
+        }), 503
+
+    logger.info("Enqueued test Celery task id=%s item_id=%s", async_result.id, item_id)
+    return jsonify({
+        'success': True,
+        'message': 'Task queued. Check worker logs for [process_item] output.',
+        'task_id': async_result.id,
+        'item_id': item_id,
+        'status_url': f'/test-celery/{async_result.id}',
+    }), 202
+
+
+@app.route('/test-celery/<task_id>', methods=['GET'])
+@require_api_key
+def test_celery_status(task_id):
+    """Poll result of a test Celery task by task id."""
+    try:
+        from celery_app import celery
+        async_result = celery.AsyncResult(task_id)
+    except Exception as exc:
+        logger.error("Failed to read Celery task status: %s", exc)
+        return jsonify({'error': 'Failed to read task status', 'details': str(exc)}), 503
+
+    response = {
+        'task_id': task_id,
+        'state': async_result.state,
+        'ready': async_result.ready(),
+        'successful': async_result.successful() if async_result.ready() else None,
+    }
+
+    if async_result.failed():
+        response['error'] = str(async_result.result)
+    elif async_result.ready() and async_result.successful():
+        response['result'] = async_result.result
+
+    return jsonify(response), 200
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
@@ -726,6 +790,8 @@ def index():
         'endpoints': {
             '/extract': 'Extract content from file URL (GET or POST with url parameter) - Requires API key',
             '/extract-base64': 'Extract content from base64 file payload (POST with base64, optional filename/contentType) - Requires API key',
+            '/test-celery': 'Enqueue test Celery task (GET/POST, optional id) - Requires API key',
+            '/test-celery/<task_id>': 'Poll test Celery task status - Requires API key',
             '/health': 'Health check endpoint'
         },
         'supported_formats': SUPPORTED_EXTENSIONS,
