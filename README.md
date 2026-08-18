@@ -1,25 +1,38 @@
-# File Extractor API
+# File Extractor / Nova Flask worker
 
-A simple Flask REST API that extracts text content from files (PDF, DOC, DOCX, CSV, TXT) via URL.
+Flask + Celery worker used by Nova for:
 
-🌐 **Production API:** [https://file-extractor-0jxu.onrender.com/](https://file-extractor-0jxu.onrender.com/)
+1. **File text extraction** (`/extract`, `/extract-base64`)
+2. **Chatbot Exact document processing** (`/chatbot-document-processing`)
+3. **R2R accounting agent** (`/r2r/accounting-agent/enqueue`)
 
-You can use the production API directly without any setup! See the [Using the Production API](#using-the-production-api) section below.
+**Environment variables:** see [`ENVIRONMENT.md`](./ENVIRONMENT.md) (complete list with descriptions). Copy `env.example` to `.env`.
+
+## Layout
+
+```text
+app.py                    # Flask factory (gunicorn app:app)
+celery_app.py / tasks.py  # Celery worker (concurrency=2)
+routes/                   # HTTP blueprints
+shared/                   # Cross-domain helpers (Supabase URLs)
+provider/                 # ERP layer (router + exact adapter)
+  router.py               # switch on connected ERP (Exact today)
+  exact/                  # Exact Online (OData, tokens, POs, journals, documents)
+fileExtraction/           # PDF/DOCX/CSV/XLSX extractors
+chatbot/                  # Document body pipeline (uses provider.exact.documents)
+r2r/                      # Accounting agent (uses provider.router / provider.exact)
+tests/
+ENVIRONMENT.md
+```
 
 ## Features
 
-- Extract text content from PDF files
-- Extract text content from DOC and DOCX files
-- Extract content from CSV files
-- Extract content from TXT files
-- Support for both GET and POST requests
-- Automatic file type detection
-- **API key authentication** for secure access
-- **Rate limiting** to prevent abuse (5 requests/minute for extract endpoint)
-- **URL validation** to prevent SSRF attacks
-- **File size limits** (50MB default, configurable)
-- **Streaming downloads** for memory efficiency
-- **Comprehensive logging** for debugging and monitoring
+- Extract text content from PDF, DOC, DOCX, CSV, TXT, XLSX
+- Queue Exact document body filling (Celery)
+- Queue R2R month-end / month-start close jobs (Celery Python agent)
+- API key authentication and rate limiting
+- URL validation to reduce SSRF risk
+- Configurable file size limits
 
 ## Installation
 
@@ -240,14 +253,10 @@ curl -X POST http://localhost:5000/extract \
 
 ## Testing
 
-Run the test suite:
 ```bash
-pytest
-```
-
-Run with verbose output:
-```bash
-pytest -v
+pytest                    # all tests under tests/
+pytest tests/test_api.py -v
+python run_local_extract.py   # manual JSON output for testing_files/*
 ```
 
 ## Deployment to Render
@@ -268,20 +277,21 @@ The `render.yaml` file configures:
 
 ## Environment Variables
 
-Create a `.env` file in the project root with the following variables:
+See **[`ENVIRONMENT.md`](./ENVIRONMENT.md)** for every variable this server reads, including chatbot and R2R accounting-agent secrets.
 
-- `FILE_EXTRACTOR_KEY` - API key for authentication (required for `/extract` endpoint). If not set, authentication is disabled.
-- `MAX_FILE_SIZE` - Maximum file size in bytes (default: 52428800 = 50MB)
-- `REQUEST_TIMEOUT` - Request timeout in seconds (default: 30)
-- `PORT` - Server port (default: 5000)
+Quick start:
 
-Example `.env` file:
+```bash
+cp env.example .env
+```
+
+Minimum for `/extract`:
+
 ```env
 FILE_EXTRACTOR_KEY=your-secret-api-key-here
-MAX_FILE_SIZE=52428800
-REQUEST_TIMEOUT=30
-PORT=5000
 ```
+
+Worker secrets: copy `env.celery.example`. File size, timeouts, models, and Exact pacing live in Python constants, not `.env`.
 
 ## Error Handling
 

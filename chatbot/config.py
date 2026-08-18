@@ -1,0 +1,41 @@
+"""Environment configuration for chatbot document processing."""
+import os
+
+from provider.exact.const import (
+    DOCUMENT_PROCESSING_API_DELAY_MS,
+    EXACT_API_BASE_URL,
+    EXACT_API_MAX_RETRIES,
+    EXACT_DOCUMENT_API_MIN_INTERVAL_MS,
+)
+from shared.supabase import (
+    DEV_SUPABASE_FUNCTIONS_URL,
+    PROD_SUPABASE_FUNCTIONS_URL,
+    VALID_ENVIRONMENTS,
+    resolve_supabase_functions_url,
+)
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL_SMALL = "gpt-4o-mini"
+SPACE_OCR_KEY = os.environ.get("SPACE_OCR_KEY", "")
+FILE_EXTRACTOR_KEY = os.environ.get("FILE_EXTRACTOR_KEY", "")
+DOCUMENT_PROCESSING_COUNT_REMAINING = True
+CHATBOT_TASK_TIME_LIMIT = 900
+CHATBOT_TASK_SOFT_TIME_LIMIT = 840
+
+__all__ = [
+    "CHATBOT_TASK_SOFT_TIME_LIMIT",
+    "CHATBOT_TASK_TIME_LIMIT",
+    "DEV_SUPABASE_FUNCTIONS_URL",
+    "DOCUMENT_PROCESSING_API_DELAY_MS",
+    "DOCUMENT_PROCESSING_COUNT_REMAINING",
+    "EXACT_API_BASE_URL",
+    "EXACT_API_MAX_RETRIES",
+    "EXACT_DOCUMENT_API_MIN_INTERVAL_MS",
+    "FILE_EXTRACTOR_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL_SMALL",
+    "PROD_SUPABASE_FUNCTIONS_URL",
+    "SPACE_OCR_KEY",
+    "VALID_ENVIRONMENTS",
+    "resolve_supabase_functions_url",
+]

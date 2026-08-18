@@ -1,0 +1,188 @@
+"""Org / supplier / document orchestration for the accounting agent."""
+from __future__ import annotations
+
+import time
+from calendar import monthrange
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from r2r.accounting_agent.discovery import (
+    build_context,
+    build_supplier_close_context,
+    event_has_document_payload,
+    event_has_supplier_payload,
+    list_supplier_close_batches,
+)
+from r2r.accounting_agent.executor import create_default_business_tools
+from r2r.accounting_agent.llm_chat import agent_chat_with_failover, get_last_agent_llm_info, run_llm_review
+from r2r.accounting_agent.loaders import get_accounting_period_context, get_organization_context
+from r2r.accounting_agent.loop import run_accounting_agent
+from r2r.accounting_agent.memory import store_memory
+from r2r.accounting_agent.period_window import build_close_period_window
+from r2r.accounting_agent.prompts import build_context_prompt, build_system_prompt, build_verifier_prompt
+from r2r.accounting_agent.review import generate_explanation, verify_execution
+from r2r.config import SUPPLIER_RUN_GAP_SECONDS
+
+
+def is_event_within_configured_window(event: dict[str, Any], policy: dict[str, Any]) -> bool:
+    occurred = datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    day_of_month = occurred.day
+    last_day = monthrange(occurred.year, occurred.month)[1]
+    if event["event_type"] == "month_start":
+        return day_of_month in (policy.get("month_start_run_days") or [])
+    offset = last_day - day_of_month
+    return offset in (policy.get("month_end_offset_days") or [])
+
+
+def _persist_and_package(
+    event: dict[str, Any],
+    context: dict[str, Any],
+    dry_run: bool,
+    extras: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    extras = extras or {}
+    tools = create_default_business_tools(context, dry_run)
+    run = run_accounting_agent(context, tools, agent_chat_with_failover)
+    llm_info = get_last_agent_llm_info()
+    verification = verify_execution(context, run["decision"], run["execution"])
+    explanation = generate_explanation(run["decision"], run["execution"], verification)
+    llm_review = run_llm_review(
+        build_verifier_prompt(context, run["decision"], run["execution"], verification)
+    )
+    if not dry_run:
+        store_memory({
+            "organization_id": event["organization_id"],
+            "event_type": event["event_type"],
+            "decision_type": run["decision"]["decision_type"],
+            "confidence": run["decision"]["confidence"],
+            "context_snapshot": context,
+            "execution_result": run["execution"],
+            "verification_result": verification,
+            "explanation": explanation,
+            "llm_info": llm_info,
+            "decision_source": run["source"],
+            "finance_controller_notifications": run["execution"].get("finance_controller_notifications") or [],
+        })
+
+    payload = event.get("payload") or {}
+    result = {
+        "success": True,
+        "dry_run": dry_run,
+        "decision_source": run["source"],
+        "llm_error": run.get("llm_error"),
+        "llm_info": llm_info,
+        "decision": run["decision"],
+        "plan": run["plan"],
+        "execution": run["execution"],
+        "verification": verification,
+        "llm_review": llm_review,
+        "explanation": explanation,
+        "event_type": event["event_type"],
+        "provider_supplier_id": (context.get("supplier_context") or {}).get("provider_supplier_id"),
+        "supplier_name": (context.get("supplier_context") or {}).get("supplier_name"),
+        "finance_controller_notifications": run["execution"].get("finance_controller_notifications") or [],
+        "purchase_order_id": str(payload["purchase_order_id"]) if payload.get("purchase_order_id") else None,
+        "purchase_invoice_id": str(payload["purchase_invoice_id"]) if payload.get("purchase_invoice_id") else None,
+        "provider_purchase_order_id": str(payload["provider_purchase_order_id"]) if payload.get("provider_purchase_order_id") else None,
+        "provider_purchase_invoice_id": str(payload["provider_purchase_invoice_id"]) if payload.get("provider_purchase_invoice_id") else None,
+        "prompts": {
+            "system": build_system_prompt(context),
+            "context": build_context_prompt(context),
+            "verifier": build_verifier_prompt(context, run["decision"], run["execution"], verification),
+        },
+        **extras,
+    }
+    return result
+
+
+def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    options = options or {}
+    dry_run = bool(options.get("dry_run"))
+    payload = event.get("payload") or {}
+
+    if event_has_document_payload(payload) and not event_has_supplier_payload(payload):
+        context = build_context(event)
+        if not is_event_within_configured_window(event, context["organization_policy"]):
+            return {
+                "success": True,
+                "dry_run": dry_run,
+                "skipped": True,
+                "message": "Event received outside configured month_start/month_end run window.",
+                "event_type": event["event_type"],
+            }
+        return _persist_and_package(event, context, dry_run)
+
+    organization_policy = get_organization_context(event["organization_id"])
+    if not is_event_within_configured_window(event, organization_policy):
+        return {
+            "success": True,
+            "dry_run": dry_run,
+            "skipped": True,
+            "org_close_run": True,
+            "event_type": event["event_type"],
+            "message": "Event received outside configured month_start/month_end run window.",
+        }
+
+    accounting_period = get_accounting_period_context(event["organization_id"], event["occurred_at"])
+    period_window = build_close_period_window({
+        "year": accounting_period["year"],
+        "period": accounting_period["period"],
+    })
+    batches = list_supplier_close_batches(
+        event["organization_id"],
+        event["event_type"],
+        {"start_date": period_window["start_date"], "end_date": period_window["end_date"]},
+    )
+    forced_supplier_id = str(payload["provider_supplier_id"]) if payload.get("provider_supplier_id") else None
+    selected = [b for b in batches if b["provider_supplier_id"] == forced_supplier_id] if forced_supplier_id else batches
+    if forced_supplier_id and not selected:
+        selected = [{
+            "provider_supplier_id": forced_supplier_id,
+            "supplier_name": str(payload["supplier_name"]) if payload.get("supplier_name") else None,
+            "purchase_orders": [],
+            "purchase_invoices": [],
+        }]
+    if not selected:
+        return {
+            "success": True,
+            "dry_run": dry_run,
+            "skipped": True,
+            "org_close_run": True,
+            "event_type": event["event_type"],
+            "supplier_count": 0,
+            "candidate_count": 0,
+            "message": (
+                "No suppliers with POs/PINVs or cost/accrued/prepaid journal activity "
+                "in the current period and previous two periods."
+            ),
+        }
+
+    results = []
+    for index, batch in enumerate(selected):
+        try:
+            context = build_supplier_close_context(event, batch, period_window)
+            results.append(_persist_and_package(event, context, dry_run, {
+                "provider_supplier_id": batch["provider_supplier_id"],
+                "supplier_name": batch.get("supplier_name"),
+            }))
+        except Exception as exc:
+            results.append({
+                "success": False,
+                "dry_run": dry_run,
+                "event_type": event["event_type"],
+                "provider_supplier_id": batch["provider_supplier_id"],
+                "supplier_name": batch.get("supplier_name"),
+                "error": str(exc),
+            })
+        if index < len(selected) - 1 and SUPPLIER_RUN_GAP_SECONDS > 0:
+            time.sleep(SUPPLIER_RUN_GAP_SECONDS)
+
+    return {
+        "success": all(r.get("success") is not False for r in results),
+        "dry_run": dry_run,
+        "org_close_run": True,
+        "event_type": event["event_type"],
+        "supplier_count": len(selected),
+        "candidate_count": len(selected),
+        "results": results,
+    }
