@@ -41,3 +41,29 @@ celery.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
 )
+
+# Load task modules on this app at import time.
+# Start command must be: celery -A celery_app worker --loglevel=info --concurrency=2
+# A bare `celery worker` (or `-A CELERY_BROKER_URL`) creates a different app
+# that only sees smoke-test tasks and discards real jobs.
+import tasks as _tasks  # noqa: E402, F401
+
+from celery.signals import worker_init  # noqa: E402
+
+_REQUIRED_TASKS = (
+    "tasks.process_item",
+    "tasks.process_chatbot_documents",
+    "tasks.process_accounting_agent_job",
+    "tasks.process_accounting_agent_jobs",
+)
+
+
+@worker_init.connect
+def _assert_required_tasks_registered(**_kwargs):
+    missing = [name for name in _REQUIRED_TASKS if name not in celery.tasks]
+    if missing:
+        raise RuntimeError(
+            "Celery worker is missing tasks: "
+            + ", ".join(missing)
+            + ". Start with: celery -A celery_app worker --loglevel=info --concurrency=2"
+        )
