@@ -5,6 +5,25 @@ import json
 from typing import Any
 
 
+def render_notify_index(rules: list[dict[str, Any]]) -> str:
+    active = [r for r in rules if r.get("is_active")]
+    notify = [r for r in active if r.get("notify_finance_controller")]
+    lines = [
+        "## Finance controller notify (from default policies)",
+        "Call `notify_finance_controller` or `escalate_to_finance_controller` ONLY when an",
+        "active policy listed under NOTIFY applies to this document. If the matching policy",
+        "has notify_finance_controller=false, or you are skipping a post, use `record_no_action`.",
+        "Never notify just because an amount is large if you are not posting.",
+        "",
+        "NOTIFY:",
+    ]
+    if notify:
+        lines.extend(f"- {r['id']} — {r['name']}" for r in notify)
+    else:
+        lines.append("- (none)")
+    return "\n".join(lines)
+
+
 def render_policies(rules: list[dict[str, Any]]) -> str:
     active = sorted(
         [r for r in rules if r.get("is_active")],
@@ -14,9 +33,11 @@ def render_policies(rules: list[dict[str, Any]]) -> str:
     standing = []
     decisions = []
     for rule in active:
+        notify = "yes" if rule.get("notify_finance_controller") else "no"
         if rule.get("standing_constraint"):
             standing.append(
-                f"- [STANDING] {rule['name']}\n    {' '.join(rule.get('reason_templates') or [])}"
+                f"- [STANDING] [notify={notify}] {rule['name']}\n"
+                f"    {' '.join(rule.get('reason_templates') or [])}"
             )
             continue
         conditions = rule.get("conditions") or []
@@ -30,7 +51,8 @@ def render_policies(rules: list[dict[str, Any]]) -> str:
         tools = rule.get("preferred_tools") or []
         tools_part = f" | preferred tools: {', '.join(tools)}" if tools else ""
         decisions.append(
-            f"- [priority {rule.get('priority')}] {rule['name']} → decision \"{rule['decision_type']}\"\n"
+            f"- [priority {rule.get('priority')}] [notify={notify}] {rule['name']} "
+            f"→ decision \"{rule['decision_type']}\"\n"
             f"    when: {conds}\n"
             f"    rationale: {' '.join(rule.get('reason_templates') or [])}{tools_part}"
         )
@@ -55,13 +77,15 @@ def build_system_prompt(context: dict[str, Any]) -> str:
         "Call tools to do the work; never describe actions you did not perform via tools.",
         "",
         "## Policy knowledge base (source of business logic)",
+        render_notify_index(context["policy_knowledge"]["rules"]),
+        "",
         render_policies(context["policy_knowledge"]["rules"]),
         "",
         "## Organization configuration",
         f"- Min threshold (materiality): {policy['materiality_threshold']} {context['accounting_period']['currency']}",
         f"- Max threshold: {policy['requires_approval_above']} {context['accounting_period']['currency']}. "
-        "At/above this amount, do NOT post a new accrual or prepaid. "
-        "Call notify_finance_controller so the finance controller can book it.",
+        "At/above this amount, do NOT post a NEW accrual or prepaid (see standing_over_threshold_notify_finance). "
+        "Do not notify if you are skipping that post.",
         (
             f"- GL accounts → cost: {policy['gl_accounts']['cost_gl_account_code']}, "
             f"accrued cost: {policy['gl_accounts']['accrued_cost_gl_account_code']}, "

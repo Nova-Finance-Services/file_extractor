@@ -1,7 +1,13 @@
 """Unit tests for prepaid status and journal proposal helpers."""
 from r2r.accounting_agent.executor import build_journal_proposal, resolve_effective_cost_gl_account
 from r2r.accounting_agent.gl_codes import pick_primary_gl_account_code_from_entry_lines
+from r2r.accounting_agent.policies import (
+    DEFAULT_POLICY_RULES,
+    NOTIFY_FINANCE_CONTROLLER_POLICY_IDS,
+    apply_notify_flags,
+)
 from r2r.accounting_agent.prepaid_status import get_prepaid_status, parse_prepaid_desc_meta
+from r2r.accounting_agent.prompts import render_notify_index, render_policies
 from r2r.accounting_agent.run import is_event_within_configured_window
 
 
@@ -268,3 +274,25 @@ def test_run_window():
         {"event_type": "month_start", "occurred_at": "2026-08-01T12:00:00.000Z"},
         policy,
     )
+
+
+def test_notify_finance_controller_policy_ids():
+    ids = {rule["id"] for rule in DEFAULT_POLICY_RULES}
+    assert NOTIFY_FINANCE_CONTROLLER_POLICY_IDS <= ids
+
+    tagged = apply_notify_flags(DEFAULT_POLICY_RULES)
+    by_id = {rule["id"]: rule for rule in tagged}
+    assert by_id["standing_over_threshold_notify_finance"]["notify_finance_controller"] is True
+    assert by_id["standing_read_existing_journals"]["notify_finance_controller"] is False
+    assert by_id["create_cost_accrual_po_delivered_not_invoiced"]["notify_finance_controller"] is False
+    assert by_id["standing_prefer_no_action"]["notify_finance_controller"] is False
+
+    index = render_notify_index(tagged)
+    assert "standing_over_threshold_notify_finance" in index
+    assert "standing_read_existing_journals" not in index
+    assert "NOTIFY:" in index
+
+    rendered = render_policies(tagged)
+    assert "[notify=yes]" in rendered
+    assert "[notify=no]" in rendered
+

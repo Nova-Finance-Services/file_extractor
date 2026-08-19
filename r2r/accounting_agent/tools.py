@@ -193,9 +193,12 @@ AGENT_TOOLS = [
         "function": {
             "name": "notify_finance_controller",
             "description": (
-                "Record a message for the finance controller inbox (stored on "
-                "agent_memory.finance_controller_notifications). Use when prepaid metadata is "
-                "missing/unclear, or any case needing human attention without posting. No ERP posting."
+                "Record a message for the finance controller inbox "
+                "(agent_memory.finance_controller_notifications). Call ONLY when an active "
+                "default policy with notify_finance_controller=true applies (over-threshold NEW "
+                "accrual/prepaid, closed period, incomplete context, blocked prepaid release, "
+                "unclear subscription). Do not call when skipping a duplicate create, immaterial "
+                "amount, fully released prepaid, or successful post/release. No ERP posting."
             ),
             "parameters": {
                 "type": "object",

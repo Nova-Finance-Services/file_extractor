@@ -5,6 +5,19 @@ from typing import Any
 
 ACCOUNTING_AGENT_POLICY_KEY = "r2r.accounting-agent"
 
+# Easy control: finance-controller inbox.
+# Add/remove a policy id here (and keep that rule is_active) to allow notify.
+# Anything not in this set must use record_no_action or post — never notify.
+# Turn a case off by removing its id, or set that rule's is_active to False.
+NOTIFY_FINANCE_CONTROLLER_POLICY_IDS = {
+    "standing_over_threshold_notify_finance",
+    "escalate_closed_period",
+    "request_approval_missing_context",
+    "escalate_uncertain_subscription_continuation",
+    "standing_prepaid_lifecycle",
+    "release_prepaid_asset_current_period",
+}
+
 DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
     {
         "id": "standing_accrual_exclude_vat",
@@ -56,7 +69,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "Do not auto-post accruals or prepaid journals when the amount acted on is below organization_policy.materiality_threshold (from p2p_settings.accounting_min_threshold). Call record_no_action instead for immaterial amounts.",
+            "Do not auto-post accruals or prepaid journals when the amount acted on is below organization_policy.materiality_threshold (from p2p_settings.accounting_min_threshold). Call record_no_action instead for immaterial amounts. Do not notify the finance controller.",
         ],
         "evidence_paths": [
             "organization_policy.materiality_threshold",
@@ -95,7 +108,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "If a new cost accrual or prepaid setup amount is at/above organization_policy.requires_approval_above, do NOT post. Call notify_finance_controller with amount, PO/PINV id, and the journal you would have booked so the finance controller can do it. Then finalize with escalate_to_finance_controller. Releases of already-booked accruals/prepaids may still post.",
+            "Applies ONLY when you would otherwise POST a NEW cost accrual or prepaid setup AND that amount is at/above organization_policy.requires_approval_above. Then do NOT post: call notify_finance_controller with amount, PO/PINV id, and the journal you would have booked, then finalize escalate_to_finance_controller. Does NOT apply if you are skipping the post (accrual/prepaid already in existing_journals, below materiality, prepaid fully released). Releases of already-booked accruals/prepaids may still post even over the threshold.",
         ],
         "evidence_paths": [
             "organization_policy.requires_approval_above",
@@ -134,7 +147,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "Read existing_journals (close window = current + previous two periods). Lines are tagged with role cost / accrued_cost / prepaid and po:{id} / pinv:{id} in description/notes. From that, decide whether an accrual or prepaid was already created or released — do not duplicate creates; prefer the matching release when appropriate.",
+            "Read existing_journals (close window = current + previous two periods). Lines are tagged with role cost / accrued_cost / prepaid and po:{id} / pinv:{id} in description/notes. From that, decide whether an accrual or prepaid was already created or released — do not duplicate creates; prefer the matching release when appropriate. If you skip a duplicate create, call record_no_action and do NOT notify_finance_controller.",
         ],
         "evidence_paths": ["existing_journals", "period_window"],
         "preferred_tools": [],
@@ -204,7 +217,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "Prefer record_no_action when no active decision policy requires a posting for the documents in scope.",
+            "Prefer record_no_action when no active decision policy requires a posting for the documents in scope. Do not notify the finance controller.",
         ],
         "evidence_paths": ["event.event_type"],
         "preferred_tools": ["RecordNoAction"],
@@ -312,7 +325,6 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "preferred_tools": [
             "CreatePrepaidJournal",
             "CreateJournalEntry",
-            "NotifyFinanceController",
         ],
         "is_active": True,
     },
@@ -329,7 +341,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             {"path": "derived_metrics.amount", "operator": "gte", "value": 1},
         ],
         "reason_templates": [
-            "PO is delivered and not invoiced, so the period requires cost accrual recognition (VAT-exclusive amount) unless existing_journals already show that accrual for this PO. On supplier batches apply per PO in supplier_context.purchase_orders using that PO's amount and po:{id} journal matches. Skip when amount is below organization_policy.materiality_threshold.",
+            "PO is delivered and not invoiced, so the period requires cost accrual recognition (VAT-exclusive amount) unless existing_journals already show that accrual for this PO — then record_no_action and do not notify. On supplier batches apply per PO in supplier_context.purchase_orders using that PO's amount and po:{id} journal matches. Skip when amount is below organization_policy.materiality_threshold.",
         ],
         "evidence_paths": [
             "po_context.purchase_order_id",
@@ -338,7 +350,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.amount",
             "existing_journals",
         ],
-        "preferred_tools": ["CreateJournalEntry", "NotifyFinanceController"],
+        "preferred_tools": ["CreateJournalEntry"],
         "is_active": True,
     },
     {
@@ -359,7 +371,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "existing_journals",
             "derived_metrics.current_period_key",
         ],
-        "preferred_tools": ["CreateJournalEntry", "NotifyFinanceController"],
+        "preferred_tools": ["CreateJournalEntry"],
         "is_active": True,
     },
     {
@@ -408,7 +420,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.current_period_key",
             "existing_journals",
         ],
-        "preferred_tools": ["CreateJournalEntry", "NotifyFinanceController"],
+        "preferred_tools": ["CreateJournalEntry"],
         "is_active": True,
     },
     {
@@ -420,7 +432,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "requires_human_approval": False,
         "conditions": [],
         "reason_templates": [
-            "No matching accounting policy rule required posting actions. Call record_no_action then finalize with no_action.",
+            "No matching accounting policy rule required posting actions. Call record_no_action then finalize with no_action. Do not notify the finance controller.",
         ],
         "evidence_paths": ["event.event_type"],
         "preferred_tools": ["RecordNoAction"],
@@ -429,5 +441,15 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
 ]
 
 
+def apply_notify_flags(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach notify_finance_controller from NOTIFY_FINANCE_CONTROLLER_POLICY_IDS."""
+    tagged: list[dict[str, Any]] = []
+    for rule in rules:
+        item = dict(rule)
+        item["notify_finance_controller"] = item.get("id") in NOTIFY_FINANCE_CONTROLLER_POLICY_IDS
+        tagged.append(item)
+    return tagged
+
+
 def get_policy_knowledge_context() -> dict[str, Any]:
-    return {"source": "code", "rules": list(DEFAULT_POLICY_RULES)}
+    return {"source": "code", "rules": apply_notify_flags(DEFAULT_POLICY_RULES)}

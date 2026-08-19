@@ -6,8 +6,8 @@ from conftest import auth_headers
 
 # Same knobs as a manual POST /r2r/accounting-agent/enqueue dry-run.
 TEST_ORG_ID = "5c06415f-4c8c-4972-b23c-5c66b85845c4"
-TEST_SUPPLIER_IDS = ["c08bb7e9-1201-4a69-bc1e-df294204589f"]
-TEST_DRY_RUN = True
+TEST_SUPPLIER_IDS = ["c08bb7e9-1201-4a69-bc1e-df294204589f","fee53397-bbb7-4d22-9b71-73473dcb078a"]
+TEST_DRY_RUN = False
 TEST_OCCURRED_AT = "2026-07-31T12:00:00.000Z"
 TEST_EVENT_TYPE = "month_end"
 TEST_ENVIRONMENT = "dev"
