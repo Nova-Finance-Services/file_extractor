@@ -18,6 +18,7 @@ from r2r.accounting_agent.loaders import (
     load_nova_po_gl_account_codes,
 )
 from r2r.accounting_agent.period_window import build_close_period_window
+from r2r.jobs import resolve_forced_supplier_ids
 from r2r.accounting_agent.policies import get_policy_knowledge_context
 from provider.exact import (
     PO_STATUS_COMPLETE,
@@ -41,7 +42,7 @@ def event_has_document_payload(payload: Optional[dict[str, Any]]) -> bool:
 
 
 def event_has_supplier_payload(payload: Optional[dict[str, Any]]) -> bool:
-    return bool((payload or {}).get("provider_supplier_id"))
+    return bool(resolve_forced_supplier_ids(payload))
 
 
 def _abs_amount(value: Any) -> float:

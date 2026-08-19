@@ -6,6 +6,7 @@ from typing import Any
 
 from r2r.accounting_agent.run import execute_accounting_agent_run
 from r2r.config import VALID_EVENT_TYPES
+from r2r.jobs import normalize_accounting_agent_job
 from r2r.runtime import set_environment
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ def _validate_job(job: Any, index: int | None = None) -> str | None:
 
 
 def _run_one_job(job: dict[str, Any]) -> dict[str, Any]:
+    job = normalize_accounting_agent_job(job)
     event: dict[str, Any] = {
         "event_type": str(job["event_type"]).strip(),
         "organization_id": str(job["organization_id"]).strip(),

@@ -12,6 +12,11 @@ from r2r.accounting_agent.executor import (
 )
 from r2r.accounting_agent.prepaid_status import get_prepaid_status
 
+# Human-approval workflow is off. Over-threshold accruals/prepaids notify the
+# finance controller (agent_memory.finance_controller_notifications) instead.
+HUMAN_APPROVAL_ENABLED = False
+_OVER_THRESHOLD_POSTING = {"create_cost_accrual", "create_prepaid_asset"}
+
 _REASON = {
     "type": "string",
     "description": "Short human-readable justification tied to the policy/context.",
@@ -157,6 +162,8 @@ AGENT_TOOLS = [
             },
         },
     },
+    # request_human_approval is kept in the catalog but omitted from get_agent_tools()
+    # while HUMAN_APPROVAL_ENABLED is False.
     {
         "type": "function",
         "function": {
@@ -245,6 +252,15 @@ AGENT_TOOLS = [
 ]
 
 
+def get_agent_tools() -> list[dict[str, Any]]:
+    if HUMAN_APPROVAL_ENABLED:
+        return AGENT_TOOLS
+    return [
+        tool for tool in AGENT_TOOLS
+        if tool["function"]["name"] != "request_human_approval"
+    ]
+
+
 def create_initial_state() -> dict[str, Any]:
     return {
         "actionLog": [],
@@ -262,6 +278,25 @@ def _period_guard(context: dict[str, Any]) -> Optional[str]:
     if not context["accounting_period"]["is_open"]:
         return "REJECTED: accounting period is closed; posting is not allowed. Escalate to the finance controller instead."
     return None
+
+
+def _threshold_guard(context: dict[str, Any], decision_type: str, args: dict[str, Any]) -> Optional[str]:
+    if HUMAN_APPROVAL_ENABLED or decision_type not in _OVER_THRESHOLD_POSTING:
+        return None
+    amount = args.get("amount") if isinstance(args.get("amount"), (int, float)) else context["derived_metrics"]["amount"]
+    limit = context["organization_policy"]["requires_approval_above"]
+    try:
+        amount_n = float(amount or 0)
+        limit_n = float(limit)
+    except (TypeError, ValueError):
+        return None
+    if amount_n < limit_n:
+        return None
+    return (
+        f"REJECTED: amount {amount_n} is at/above finance-controller threshold {limit_n}. "
+        "Do not post this accrual/prepaid. Call notify_finance_controller with amount, "
+        "document id, and the booking you would have made so the finance controller can do it."
+    )
 
 
 def _record_timeline(state: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -301,8 +336,20 @@ def _post(
     args: dict[str, Any],
     verb: str,
 ) -> dict[str, Any]:
-    blocked = _period_guard(context)
+    blocked = _period_guard(context) or _threshold_guard(context, decision_type, args)
     if blocked:
+        if "at/above finance-controller threshold" in blocked:
+            _push_finance_notification(state, context, "notify", blocked, {
+                "provider_purchase_order_id": args.get("provider_purchase_order_id")
+                if isinstance(args.get("provider_purchase_order_id"), str)
+                else None,
+                "provider_purchase_invoice_id": args.get("provider_purchase_invoice_id")
+                if isinstance(args.get("provider_purchase_invoice_id"), str)
+                else None,
+            })
+            tools["notifyFinanceController"](blocked, {
+                "provider_supplier_id": (context.get("supplier_context") or {}).get("provider_supplier_id"),
+            })
         _record_timeline(state, {"tool": tool_name, "result": blocked})
         return {"content": blocked}
 
@@ -419,17 +466,18 @@ def execute_agent_tool(
         state["toolSequence"].append({"tool": "ReversePrepaidJournal", "action": "Release prepaid asset"})
         return _post(context, tools, state, name, "release_prepaid_asset", tools["createJournalEntry"], args, "Released prepaid into cost")
     if name == "request_human_approval":
-        state["toolSequence"].append({"tool": "RequestApproval", "action": "Request human approval"})
-        reason = str(args.get("reason") or "approval required")
-        message = f"Approval requested: {reason}"
-        _push_finance_notification(state, context, "approval", message, {
+        # Disabled: same path as notify_finance_controller.
+        state["toolSequence"].append({"tool": "NotifyFinanceController", "action": "Notify"})
+        reason = str(args.get("reason") or "needs finance-controller attention")
+        message = f"Needs finance controller: {reason}"
+        _push_finance_notification(state, context, "notify", message, {
             "provider_purchase_order_id": context["po_context"].get("provider_purchase_order_id"),
         })
         tools["notifyFinanceController"](message, {
             "provider_purchase_order_id": context["po_context"].get("provider_purchase_order_id"),
             "provider_supplier_id": (context.get("supplier_context") or {}).get("provider_supplier_id"),
         })
-        line = f"Requested human approval: {reason}"
+        line = f"Notified finance controller: {reason}"
         state["actionLog"].append(line)
         _record_timeline(state, {"tool": name, "args": args, "result": line})
         return {"content": f"OK: {line}"}
@@ -469,10 +517,17 @@ def execute_agent_tool(
         amount = context["derived_metrics"]["amount"]
         over_threshold = amount >= context["organization_policy"]["requires_approval_above"]
         reason = args.get("reason")
+        decision_type = args.get("decision_type") or "no_action"
+        if not HUMAN_APPROVAL_ENABLED and decision_type == "request_human_approval":
+            decision_type = "escalate_to_finance_controller"
         decision = {
-            "decision_type": args.get("decision_type") or "no_action",
+            "decision_type": decision_type,
             "confidence": args["confidence"] if isinstance(args.get("confidence"), (int, float)) else 0.5,
-            "requires_human_approval": bool(args.get("requires_human_approval")) or over_threshold,
+            "requires_human_approval": (
+                bool(args.get("requires_human_approval")) or over_threshold
+                if HUMAN_APPROVAL_ENABLED
+                else False
+            ),
             "reason": reason if isinstance(reason, list) and reason else ["Decision recorded by AI agent."],
             "evidence": args.get("evidence") if isinstance(args.get("evidence"), list) else [],
             "preferred_tools": [s["tool"] for s in state["toolSequence"]],

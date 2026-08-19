@@ -66,6 +66,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "is_active": True,
     },
     {
+        # Human approval is disabled. Over-threshold bookings go to the finance controller.
         "id": "standing_approval_threshold",
         "name": "Flag human approval when amount is at/above org max threshold",
         "decision_type": "request_human_approval",
@@ -82,6 +83,25 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.amount",
         ],
         "preferred_tools": ["RequestApproval"],
+        "is_active": False,
+    },
+    {
+        "id": "standing_over_threshold_notify_finance",
+        "name": "Notify finance controller instead of posting accrual/prepaid at/above max threshold",
+        "decision_type": "escalate_to_finance_controller",
+        "priority": 100,
+        "confidence": 1,
+        "requires_human_approval": False,
+        "standing_constraint": True,
+        "conditions": [],
+        "reason_templates": [
+            "If a new cost accrual or prepaid setup amount is at/above organization_policy.requires_approval_above, do NOT post. Call notify_finance_controller with amount, PO/PINV id, and the journal you would have booked so the finance controller can do it. Then finalize with escalate_to_finance_controller. Releases of already-booked accruals/prepaids may still post.",
+        ],
+        "evidence_paths": [
+            "organization_policy.requires_approval_above",
+            "derived_metrics.amount",
+        ],
+        "preferred_tools": ["NotifyFinanceController"],
         "is_active": True,
     },
     {
@@ -209,17 +229,17 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
     },
     {
         "id": "request_approval_missing_context",
-        "name": "Request human approval for incomplete context",
-        "decision_type": "request_human_approval",
+        "name": "Notify finance controller for incomplete context",
+        "decision_type": "escalate_to_finance_controller",
         "priority": 90,
         "confidence": 0.75,
-        "requires_human_approval": True,
+        "requires_human_approval": False,
         "conditions": [{"path": "data_quality.is_complete", "operator": "eq", "value": False}],
         "reason_templates": [
-            "Context is incomplete and deterministic posting requirements are not met. Call request_human_approval then finalize with that decision_type — do not post.",
+            "Context is incomplete and posting requirements are not met. Do not post. Call notify_finance_controller with the missing fields, then finalize with escalate_to_finance_controller.",
         ],
         "evidence_paths": ["data_quality.missing_fields"],
-        "preferred_tools": ["RequestApproval", "NotifyFinanceController"],
+        "preferred_tools": ["NotifyFinanceController"],
         "is_active": True,
     },
     {
@@ -292,7 +312,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "preferred_tools": [
             "CreatePrepaidJournal",
             "CreateJournalEntry",
-            "RequestApproval",
+            "NotifyFinanceController",
         ],
         "is_active": True,
     },
@@ -318,7 +338,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.amount",
             "existing_journals",
         ],
-        "preferred_tools": ["CreateJournalEntry", "RequestApproval"],
+        "preferred_tools": ["CreateJournalEntry", "NotifyFinanceController"],
         "is_active": True,
     },
     {
@@ -339,7 +359,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "existing_journals",
             "derived_metrics.current_period_key",
         ],
-        "preferred_tools": ["CreateJournalEntry", "RequestApproval"],
+        "preferred_tools": ["CreateJournalEntry", "NotifyFinanceController"],
         "is_active": True,
     },
     {
@@ -353,7 +373,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             {"path": "supplier_context.purchase_invoices", "operator": "exists"},
         ],
         "reason_templates": [
-            "Possible recurring subscription, but it is unclear whether it continues into the current period (gap in history, amount changed a lot, one-off vs recurring, or end-date hints in description/YourRef). Do NOT accrue. Call escalate_to_finance_controller or request_human_approval explaining the uncertainty, then finalize with that decision.",
+            "Possible recurring subscription, but it is unclear whether it continues into the current period (gap in history, amount changed a lot, one-off vs recurring, or end-date hints in description/YourRef). Do NOT accrue. Call notify_finance_controller explaining the uncertainty, then finalize with escalate_to_finance_controller.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_invoices",
@@ -388,7 +408,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.current_period_key",
             "existing_journals",
         ],
-        "preferred_tools": ["CreateJournalEntry", "RequestApproval"],
+        "preferred_tools": ["CreateJournalEntry", "NotifyFinanceController"],
         "is_active": True,
     },
     {

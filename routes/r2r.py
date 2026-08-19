@@ -4,6 +4,7 @@ import logging
 from flask import Blueprint, jsonify, request
 
 from r2r import config as r2r_config
+from r2r.jobs import normalize_accounting_agent_job
 from routes.auth import require_api_key
 from routes.limiter import limiter
 
@@ -66,7 +67,7 @@ def r2r_accounting_agent_enqueue():
         for job in jobs:
             async_result = process_accounting_agent_job.delay({
                 **payload_base,
-                "job": job,
+                "job": normalize_accounting_agent_job(job),
             })
             task_ids.append(async_result.id)
     except Exception as exc:

@@ -13,11 +13,12 @@ from r2r.accounting_agent.discovery import (
     event_has_supplier_payload,
     list_supplier_close_batches,
 )
+from r2r.jobs import resolve_forced_supplier_ids
 from r2r.accounting_agent.executor import create_default_business_tools
 from r2r.accounting_agent.llm_chat import agent_chat_with_failover, get_last_agent_llm_info, run_llm_review
 from r2r.accounting_agent.loaders import get_accounting_period_context, get_organization_context
 from r2r.accounting_agent.loop import run_accounting_agent
-from r2r.accounting_agent.memory import store_memory
+from r2r.accounting_agent.memory import store_org_close_memory
 from r2r.accounting_agent.period_window import build_close_period_window
 from r2r.accounting_agent.prompts import build_context_prompt, build_system_prompt, build_verifier_prompt
 from r2r.accounting_agent.review import generate_explanation, verify_execution
@@ -49,20 +50,6 @@ def _persist_and_package(
     llm_review = run_llm_review(
         build_verifier_prompt(context, run["decision"], run["execution"], verification)
     )
-    if not dry_run:
-        store_memory({
-            "organization_id": event["organization_id"],
-            "event_type": event["event_type"],
-            "decision_type": run["decision"]["decision_type"],
-            "confidence": run["decision"]["confidence"],
-            "context_snapshot": context,
-            "execution_result": run["execution"],
-            "verification_result": verification,
-            "explanation": explanation,
-            "llm_info": llm_info,
-            "decision_source": run["source"],
-            "finance_controller_notifications": run["execution"].get("finance_controller_notifications") or [],
-        })
 
     payload = event.get("payload") or {}
     result = {
@@ -110,7 +97,14 @@ def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[s
                 "message": "Event received outside configured month_start/month_end run window.",
                 "event_type": event["event_type"],
             }
-        return _persist_and_package(event, context, dry_run)
+        result = _persist_and_package(event, context, dry_run)
+        if not dry_run:
+            store_org_close_memory(
+                event=event,
+                results=[result],
+                accounting_period=context.get("accounting_period"),
+            )
+        return result
 
     organization_policy = get_organization_context(event["organization_id"])
     if not is_event_within_configured_window(event, organization_policy):
@@ -133,15 +127,22 @@ def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[s
         event["event_type"],
         {"start_date": period_window["start_date"], "end_date": period_window["end_date"]},
     )
-    forced_supplier_id = str(payload["provider_supplier_id"]) if payload.get("provider_supplier_id") else None
-    selected = [b for b in batches if b["provider_supplier_id"] == forced_supplier_id] if forced_supplier_id else batches
-    if forced_supplier_id and not selected:
-        selected = [{
-            "provider_supplier_id": forced_supplier_id,
-            "supplier_name": str(payload["supplier_name"]) if payload.get("supplier_name") else None,
-            "purchase_orders": [],
-            "purchase_invoices": [],
-        }]
+    forced_ids = resolve_forced_supplier_ids(payload)
+    if forced_ids:
+        by_id = {batch["provider_supplier_id"]: batch for batch in batches}
+        selected = []
+        for supplier_id in forced_ids:
+            if supplier_id in by_id:
+                selected.append(by_id[supplier_id])
+            else:
+                selected.append({
+                    "provider_supplier_id": supplier_id,
+                    "supplier_name": str(payload["supplier_name"]) if payload.get("supplier_name") else None,
+                    "purchase_orders": [],
+                    "purchase_invoices": [],
+                })
+    else:
+        selected = batches
     if not selected:
         return {
             "success": True,
@@ -176,6 +177,13 @@ def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[s
             })
         if index < len(selected) - 1 and SUPPLIER_RUN_GAP_SECONDS > 0:
             time.sleep(SUPPLIER_RUN_GAP_SECONDS)
+
+    if not dry_run:
+        store_org_close_memory(
+            event=event,
+            results=results,
+            accounting_period=accounting_period,
+        )
 
     return {
         "success": all(r.get("success") is not False for r in results),

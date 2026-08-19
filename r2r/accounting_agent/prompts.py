@@ -59,7 +59,9 @@ def build_system_prompt(context: dict[str, Any]) -> str:
         "",
         "## Organization configuration",
         f"- Min threshold (materiality): {policy['materiality_threshold']} {context['accounting_period']['currency']}",
-        f"- Max threshold (approval at/above): {policy['requires_approval_above']} {context['accounting_period']['currency']}",
+        f"- Max threshold: {policy['requires_approval_above']} {context['accounting_period']['currency']}. "
+        "At/above this amount, do NOT post a new accrual or prepaid. "
+        "Call notify_finance_controller so the finance controller can book it.",
         (
             f"- GL accounts → cost: {policy['gl_accounts']['cost_gl_account_code']}, "
             f"accrued cost: {policy['gl_accounts']['accrued_cost_gl_account_code']}, "
@@ -113,7 +115,7 @@ def build_verifier_prompt(
         'Respond as strict JSON: {"approved": boolean, "summary": string, "concerns": string[]}.',
         "",
         f"Decision: {decision.get('decision_type')} (confidence {decision.get('confidence')})",
-        f"Requires human approval: {decision.get('requires_human_approval')}",
+        f"Requires human approval: {decision.get('requires_human_approval')} (workflow disabled; use finance-controller notifications)",
         f"Period open: {context['accounting_period']['is_open']}",
         f"Existing journals in window: {len(context.get('existing_journals') or [])}",
         f"Invoice months covered: {context['derived_metrics']['invoice_months_covered']}",
