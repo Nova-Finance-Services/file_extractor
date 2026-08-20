@@ -37,11 +37,14 @@ def _openai():
 
 
 def _call_openai(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str) -> dict[str, Any]:
+    # gpt-5.6-sol (and similar) default reasoning_effort, which chat.completions
+    # rejects when function tools are present. Force none so tool calls work.
     completion = _openai().chat.completions.create(
         model=model,
         messages=messages,
         tools=tools,
         tool_choice="auto",
+        extra_body={"reasoning_effort": "none"},
     )
     msg = completion.choices[0].message
     tool_calls = []
