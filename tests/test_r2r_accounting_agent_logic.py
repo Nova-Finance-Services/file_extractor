@@ -395,3 +395,38 @@ def test_parse_responses_output_function_call():
     }]
     assert parsed["content"] is None
 
+
+def test_verify_execution_rejects_same_gl_prepaid_release():
+    from r2r.accounting_agent.review import verify_execution
+
+    context = {
+        "accounting_period": {"is_open": True},
+    }
+    execution = {
+        "success": True,
+        "provider_entry_id": "entry-1",
+        "journal_proposal": {
+            "debit_account": "2302",
+            "credit_account": "2302",
+            "amount": 2420,
+        },
+    }
+    result = verify_execution(context, {"decision_type": "release_prepaid_asset"}, execution)
+    assert result["success"] is False
+    assert any(c["check"] == "Debit and credit accounts differ" and not c["passed"] for c in result["checks"])
+
+
+def test_verify_execution_accepts_expense_vs_prepaid_gl():
+    from r2r.accounting_agent.review import verify_execution
+
+    result = verify_execution(
+        {"accounting_period": {"is_open": True}},
+        {"decision_type": "release_prepaid_asset"},
+        {
+            "success": True,
+            "provider_entry_id": "entry-1",
+            "journal_proposal": {"debit_account": "7000", "credit_account": "2302"},
+        },
+    )
+    assert result["success"] is True
+

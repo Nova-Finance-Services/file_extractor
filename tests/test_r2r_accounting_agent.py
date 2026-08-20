@@ -6,10 +6,9 @@ from conftest import auth_headers
 
 # Same knobs as a manual POST /r2r/accounting-agent/enqueue dry-run.
 TEST_ORG_ID = "5c06415f-4c8c-4972-b23c-5c66b85845c4"
-TEST_SUPPLIER_IDS = ["c6aec698-d5bf-4d21-b9ad-47882ca68443"]
-#"c08bb7e9-1201-4a69-bc1e-df294204589f","fee53397-bbb7-4d22-9b71-73473dcb078a",
+TEST_SUPPLIER_IDS = ["c6aec698-d5bf-4d21-b9ad-47882ca68443","c08bb7e9-1201-4a69-bc1e-df294204589f","fee53397-bbb7-4d22-9b71-73473dcb078a"]
 TEST_DRY_RUN = False
-TEST_OCCURRED_AT = "2026-08-03T12:00:00.000Z"
+TEST_OCCURRED_AT = "2026-09-03T12:00:00.000Z"
 TEST_EVENT_TYPE = "month_start"
 TEST_ENVIRONMENT = "dev"
 TEST_BUSINESS_EVENT_TYPE = "month_end_org_close"
@@ -178,8 +177,86 @@ def test_org_close_writes_one_memory_row(mock_insert):
     assert row["organization_id"] == TEST_ORG_ID
     assert row["decision_type"] == "org_close"
     assert row["context_snapshot"]["supplier_count"] == 2
-    assert len(row["execution_result"]["suppliers"]) == 2
-    assert row["execution_result"]["suppliers"][0]["provider_supplier_id"] == TEST_SUPPLIER_IDS[0]
-    assert "action_log" not in (row["execution_result"]["suppliers"][0]["execution"] or {})
+    assert row["context_snapshot"]["period_key"] == "2026-07"
+    assert row["execution_plan"]["supplier_count"] == 2
+    assert row["execution_plan"]["decision_types"] == ["create_cost_accrual", "no_action"]
+    suppliers = row["execution_result"]["suppliers"]
+    assert len(suppliers) == 2
+    assert suppliers[0]["provider_supplier_id"] == TEST_SUPPLIER_IDS[0]
+    assert suppliers[0]["decision_type"] == "create_cost_accrual"
+    assert "explanation" not in suppliers[0]
+    assert "decision" not in suppliers[0]
+    assert "action_log" not in (suppliers[0]["execution"] or {})
     assert len(row["finance_controller_notifications"]) == 1
-    assert mock_insert.call_count == 1
+    assert row["explanation"]["decision"] == "org_close"
+    assert "2 supplier run(s)" in row["explanation"]["summary"]
+    assert row["explanation"]["confidence"] == 0.8
+    assert row["verification_result"]["review_rejected_supplier_ids"] == []
+
+
+@patch("r2r.accounting_agent.memory.supabase_rest.insert")
+def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
+    from r2r.accounting_agent.memory import store_org_close_memory
+
+    store_org_close_memory(
+        event={
+            "organization_id": TEST_ORG_ID,
+            "event_type": TEST_EVENT_TYPE,
+            "occurred_at": TEST_OCCURRED_AT,
+        },
+        results=[
+            {
+                "provider_supplier_id": TEST_SUPPLIER_IDS[0],
+                "supplier_name": "Lumen Advisory B.V.",
+                "success": True,
+                "decision": {
+                    "decision_type": "release_prepaid_asset",
+                    "confidence": 0.99,
+                    "reason": ["September slice can be released."],
+                    "evidence": ["setup 7260, remaining 4840"],
+                },
+                "execution": {
+                    "success": True,
+                    "period_key": "2026-09",
+                    "entry_number": 26900069,
+                    "provider_entry_id": "4b178970-041f-454a-9ae1-e8d2151f11b7",
+                    "journal_proposal": {
+                        "amount": 2420.0,
+                        "currency": "EUR",
+                        "debit_account": "2302",
+                        "credit_account": "2302",
+                        "posting_date": "2026-09-03",
+                    },
+                    "tool_timeline": [
+                        {
+                            "at": "2026-08-20T08:59:52Z",
+                            "tool": "get_prepaid_status",
+                            "args": {"reason": "check remaining", "provider_purchase_invoice_id": "pinv-1"},
+                            "result": '{"setup_amount": 7260.0, "remaining": 4840.0, "suggested_release": 2420.0}',
+                        },
+                        {
+                            "tool": "finalize",
+                            "args": {"reason": ["September slice can be released."], "evidence": ["setup 7260"]},
+                            "result": "release_prepaid_asset",
+                        },
+                    ],
+                },
+                "llm_review": {"approved": False, "summary": "Same GL both legs."},
+                "explanation": {"reason": ["duplicate of decision"], "decision": "release_prepaid_asset"},
+            }
+        ],
+        accounting_period={"year": 2026, "period": 9},
+    )
+
+    row = mock_insert.call_args.args[1]
+    supplier = row["execution_result"]["suppliers"][0]
+    assert supplier["posting"]["same_gl_both_legs"] is True
+    assert supplier["posting"]["debit_account"] == "2302"
+    assert supplier["prepaid_status"]["remaining"] == 4840.0
+    assert "explanation" not in supplier
+    finalize = supplier["execution"]["tool_timeline"][1]
+    assert finalize["tool"] == "finalize"
+    assert "args" not in finalize
+    assert "1 llm_review rejected" in row["explanation"]["summary"]
+    assert "same debit and credit GL" in row["explanation"]["summary"]
+    assert row["verification_result"]["review_rejected_supplier_ids"] == [TEST_SUPPLIER_IDS[0]]
