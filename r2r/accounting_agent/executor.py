@@ -189,10 +189,17 @@ def build_journal_proposal(
     elif provider_pinv_id:
         pinv_label = f"PINV {provider_pinv_id}"
 
+    user_desc = (opts.get("description") or "").strip()
+    action_desc = selected["description"]
+    if user_desc:
+        if action_desc.lower() not in user_desc.lower():
+            user_desc = f"{action_desc} | {user_desc}"
+    else:
+        user_desc = action_desc
     linked = " | ".join(
         p
         for p in [
-            (opts.get("description") or "").strip() or selected["description"],
+            user_desc,
             po_label,
             f"po:{provider_po_id}" if provider_po_id else None,
             pinv_label,

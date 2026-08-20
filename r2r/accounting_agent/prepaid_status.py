@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -75,23 +76,43 @@ def _line_text(line: dict[str, Any]) -> str:
     return f"{line.get('description') or ''} {line.get('notes') or ''}"
 
 
-def _classify_prepaid_line(line: dict[str, Any]) -> str:
-    text = _line_text(line).lower()
-    if "prepaid setup" in text:
-        return "setup"
-    if "prepaid release" in text:
-        return "release"
-    if line.get("role") == "prepaid":
-        amt = line.get("amount_dc")
-        try:
-            number = float(amt)
-        except (TypeError, ValueError):
-            return "unknown"
-        if number > 0:
-            return "setup"
-        if number < 0:
-            return "release"
-    return "unknown"
+def _signed_amount(line: dict[str, Any]) -> float:
+    raw = line.get("amount_dc") if line.get("amount_dc") is not None else line.get("amount_fc")
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if number != number else number
+
+
+def _prepaid_movements(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One memorial entry is setup OR release, never both legs of the same posting."""
+    by_entry: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for line in lines:
+        key = str(line.get("entry_id") or line.get("id") or "")
+        by_entry[key].append(line)
+
+    movements: list[dict[str, Any]] = []
+    for group in by_entry.values():
+        prepaid = [line for line in group if line.get("role") == "prepaid"]
+        source = prepaid or [
+            line for line in group
+            if "prepaid setup" in _line_text(line).lower() or "prepaid release" in _line_text(line).lower()
+        ]
+        if not source:
+            continue
+        sample = source[0]
+        text = _line_text(sample).lower()
+        net = sum(_signed_amount(line) for line in source)
+        amt = _round2(abs(net)) if abs(net) >= 0.01 else max(_abs_amount(_signed_amount(line)) for line in source)
+        if amt <= 0:
+            continue
+        if "prepaid release" in text or (abs(net) >= 0.01 and net < 0):
+            kind = "release"
+        else:
+            kind = "setup"
+        movements.append({"kind": kind, "amount": amt, "line": sample})
+    return movements
 
 
 def _period_key_from_date(value: Optional[str]) -> Optional[str]:
@@ -126,19 +147,17 @@ def get_prepaid_status(context: dict[str, Any], provider_purchase_invoice_id: st
         line for line in (context.get("existing_journals") or [])
         if needle in _line_text(line).lower()
     ]
-    prepaid_lines = [line for line in matching if line.get("role") == "prepaid"]
-    lines_for_balance = prepaid_lines or matching
+    movements = _prepaid_movements(matching)
 
     setup_amount = 0.0
     released_to_date = 0.0
     released_this_period = False
     release_amounts: list[float] = []
 
-    for line in lines_for_balance:
-        kind = _classify_prepaid_line(line)
-        amt = _abs_amount(line.get("amount_dc") if line.get("amount_dc") is not None else line.get("amount_fc"))
-        if amt <= 0:
-            continue
+    for movement in movements:
+        kind = movement["kind"]
+        amt = movement["amount"]
+        line = movement["line"]
         parsed = parse_prepaid_desc_meta(line.get("description") or line.get("notes"))
         if parsed.get("entry_number") is not None and inv_number is None:
             inv_number = parsed["entry_number"]

@@ -108,6 +108,57 @@ def test_prepaid_status_suggests_monthly_release():
     assert status["released_this_period"] is False
 
 
+def test_prepaid_status_does_not_treat_setup_credit_as_full_release():
+    """Setup memorial has +prepaid / -cost with the same PINV tag and no 'Prepaid setup' wording."""
+    pinv_id = "527836fb-7f90-4554-80d2-ed9045b1806f"
+    desc = f"inv INV-LM-2026-0731 | service 2026-08-01 to 2026-10-31 | PI | pinv:{pinv_id}"
+    ctx = _base_context(
+        supplier_context={
+            "provider_supplier_id": "c6aec698-d5bf-4d21-b9ad-47882ca68443",
+            "supplier_name": "Lumen Advisory B.V.",
+            "purchase_orders": [],
+            "purchase_invoices": [
+                {
+                    "provider_purchase_invoice_id": pinv_id,
+                    "amount": 7260,
+                    "service_period_start": "2026-08-01",
+                    "service_period_end": "2026-10-31",
+                    "invoice_months_covered": 3,
+                    "prepaid_monthly_release_amount": 2420,
+                    "service_covers_current_period": True,
+                }
+            ],
+        },
+        existing_journals=[
+            {
+                "id": "debit",
+                "entry_id": "setup-entry",
+                "date": "2026-07-31",
+                "amount_dc": 7260,
+                "role": "prepaid",
+                "description": desc,
+                "notes": f"pinv:{pinv_id}",
+            },
+            {
+                "id": "credit",
+                "entry_id": "setup-entry",
+                "date": "2026-07-31",
+                "amount_dc": -7260,
+                "role": "cost",
+                "description": desc,
+                "notes": f"pinv:{pinv_id}",
+            },
+        ],
+    )
+    status = get_prepaid_status(ctx, pinv_id)
+    assert status["setup_amount"] == 7260
+    assert status["released_to_date"] == 0
+    assert status["remaining"] == 7260
+    assert status["suggested_release"] == 2420
+    assert status["can_release"] is True
+    assert "fully_released" not in status["flags"]
+
+
 def test_prepaid_status_true_up_last_month():
     pinv_id = "pinv-guid-2"
     ctx = _base_context(

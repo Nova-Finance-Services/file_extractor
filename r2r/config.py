@@ -10,7 +10,7 @@ VALID_EVENT_TYPES = frozenset({"month_start", "month_end"})
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-OPENAI_MODEL_COMPLEX = "gpt-5.4"
+OPENAI_MODEL_COMPLEX =os.environ.get("OPENAI_MODEL_COMPLEX", "gpt-5.4") 
 OPENAI_MODEL_MEDIUM = "gpt-5-mini"
 CLAUDE_MODEL_COMPLEX = "claude-opus-4-8"
 CLAUDE_MODEL_MEDIUM = "claude-sonnet-4-6"
