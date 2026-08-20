@@ -328,6 +328,66 @@ def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
 
 
 @patch("r2r.accounting_agent.memory.supabase_rest.insert")
+def test_org_close_memory_keeps_every_posted_journal(mock_insert):
+    from r2r.accounting_agent.memory import store_run_memory
+
+    store_run_memory(
+        event={
+            "organization_id": TEST_ORG_ID,
+            "event_type": TEST_EVENT_TYPE,
+            "occurred_at": TEST_OCCURRED_AT,
+        },
+        results=[
+            {
+                "provider_supplier_id": TEST_SUPPLIER_IDS[0],
+                "supplier_name": "Acme",
+                "success": True,
+                "decision": {"decision_type": "release_prepaid_asset", "confidence": 0.99},
+                "execution": {
+                    "success": True,
+                    "provider_entry_id": "entry-2",
+                    "journal_proposal": {"amount": 2000, "currency": "EUR", "debit_account": "7000", "credit_account": "1600"},
+                    "posted_journals": [
+                        {
+                            "provider_entry_id": "entry-1",
+                            "journal_proposal": {
+                                "amount": 1000,
+                                "currency": "EUR",
+                                "debit_account": "7000",
+                                "credit_account": "1600",
+                                "description": "PINV 1 release",
+                            },
+                        },
+                        {
+                            "provider_entry_id": "entry-2",
+                            "journal_proposal": {
+                                "amount": 2000,
+                                "currency": "EUR",
+                                "debit_account": "7000",
+                                "credit_account": "1600",
+                                "description": "PINV 2 release",
+                            },
+                        },
+                    ],
+                    "tool_timeline": [],
+                },
+            }
+        ],
+        accounting_period={"year": 2026, "period": 10, "currency": "EUR"},
+        request_id="req-multi",
+        task_id="task-multi",
+    )
+
+    row = mock_insert.call_args.args[1]
+    actions = row["items"][0]["actions"]
+    assert len(actions) == 2
+    assert [action["amount"] for action in actions] == [1000, 2000]
+    assert [action["provider_entry_id"] for action in actions] == ["entry-1", "entry-2"]
+    assert row["posted_amount"] == 3000
+    assert row["action_count"] == 2
+
+
+@patch("r2r.accounting_agent.memory.supabase_rest.insert")
 def test_skipped_run_writes_memory_row(mock_insert):
     from r2r.accounting_agent.memory import store_run_memory
 

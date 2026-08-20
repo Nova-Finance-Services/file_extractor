@@ -324,3 +324,217 @@ def test_verify_execution_accepts_expense_vs_prepaid_gl():
     )
     assert result["success"] is True
 
+
+def _batch_context():
+    return _base_context(
+        derived_metrics={"current_period_key": "2026-10", "po_count": 2, "pinv_count": 2},
+        supplier_context={
+            "provider_supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "purchase_orders": [
+                {
+                    "provider_purchase_order_id": "po-1",
+                    "amount": 4000,
+                    "is_delivered": True,
+                    "invoice_received": False,
+                },
+                {
+                    "provider_purchase_order_id": "po-2",
+                    "amount": 6000,
+                    "is_delivered": True,
+                    "invoice_received": False,
+                },
+            ],
+            "purchase_invoices": [
+                {
+                    "provider_purchase_invoice_id": "pinv-1",
+                    "amount": 1000,
+                    "currency": "EUR",
+                    "description": "Aug retainer",
+                },
+                {
+                    "provider_purchase_invoice_id": "pinv-2",
+                    "amount": 3000,
+                    "currency": "EUR",
+                    "description": "Sep retainer",
+                },
+            ],
+        },
+    )
+
+
+def test_batch_amount_is_document_specific():
+    from r2r.accounting_agent.executor import resolve_posting_amount
+
+    ctx = _batch_context()
+    assert "amount" not in ctx["derived_metrics"]
+    assert resolve_posting_amount(ctx, "create_prepaid_asset", {
+        "provider_purchase_invoice_id": "pinv-2",
+    }) == 3000
+    assert resolve_posting_amount(ctx, "create_cost_accrual", {
+        "provider_purchase_order_id": "po-2",
+    }) == 6000
+    assert resolve_posting_amount(ctx, "release_prepaid_asset", {
+        "provider_purchase_invoice_id": "pinv-2",
+    }) == 0
+    assert resolve_posting_amount(ctx, "create_prepaid_asset", {}) == 0
+
+    proposal = build_journal_proposal(ctx, "create_prepaid_asset", {
+        "amount": 3000,
+        "provider_purchase_invoice_id": "pinv-2",
+        "reason": "setup PINV 2",
+    })
+    assert proposal["amount"] == 3000
+    assert proposal["metadata"]["provider_purchase_invoice_id"] == "pinv-2"
+
+
+def test_threshold_uses_document_amount_not_batch_total():
+    from r2r.accounting_agent.executor import create_default_business_tools
+    from r2r.accounting_agent.tools import create_initial_state, execute_agent_tool
+
+    ctx = _batch_context()
+    ctx["organization_policy"]["requires_approval_above"] = 5000
+    tools = create_default_business_tools(ctx, dry_run=True)
+    state = create_initial_state()
+    result = execute_agent_tool(
+        "create_prepaid_asset",
+        {
+            "amount": 3000,
+            "provider_purchase_invoice_id": "pinv-2",
+            "reason": "setup PINV 2 only",
+            "description": "inv 2 | service 2026-09-01 to 2026-09-30",
+        },
+        ctx,
+        tools,
+        state,
+    )
+    assert result["content"].startswith("OK:")
+    assert state["postedJournals"][0]["journal_proposal"]["amount"] == 3000
+
+
+def test_invalid_gl_override_does_not_notify():
+    from r2r.accounting_agent.executor import create_default_business_tools
+    from r2r.accounting_agent.tools import create_initial_state, execute_agent_tool
+
+    ctx = _base_context(
+        po_context={
+            "provider_purchase_order_id": "erp-po-1",
+            "is_delivered": True,
+            "invoice_received": False,
+            "amount": 2000,
+        },
+    )
+    tools = create_default_business_tools(ctx, dry_run=True)
+    state = create_initial_state()
+    execute_agent_tool(
+        "create_cost_accrual",
+        {"reason": "accrue PO", "amount": 2000, "cost_gl_account_code": "9999"},
+        ctx,
+        tools,
+        state,
+    )
+    assert state["financeControllerNotifications"] == []
+    assert any("Ignored invalid cost_gl_account_code 9999" in line for line in state["actionLog"])
+    assert state["postedJournals"][0]["journal_proposal"]["debit_account"] == "6000"
+
+
+def test_infer_prepaid_release_from_reverse_prepaid_journal():
+    from r2r.accounting_agent.loop import _infer_decision_type
+
+    assert _infer_decision_type({
+        "toolSequence": [{"tool": "ReversePrepaidJournal", "action": "Release prepaid asset"}],
+    }) == "release_prepaid_asset"
+
+
+def test_max_agent_iterations_allows_multi_document_walk():
+    from r2r.accounting_agent.constants import MAX_AGENT_ITERATIONS
+
+    assert MAX_AGENT_ITERATIONS >= 16
+
+
+def test_supplier_close_context_stays_document_neutral():
+    from unittest.mock import patch
+    from r2r.accounting_agent.discovery import build_supplier_close_context
+
+    batch = {
+        "provider_supplier_id": "sup-1",
+        "supplier_name": "Acme",
+        "purchase_orders": [
+            {"provider_purchase_order_id": "po-1", "amount": 4000, "is_delivered": True},
+            {"provider_purchase_order_id": "po-2", "amount": 6000, "is_delivered": True},
+        ],
+        "purchase_invoices": [
+            {"provider_purchase_invoice_id": "pinv-1", "amount": 1000},
+            {"provider_purchase_invoice_id": "pinv-2", "amount": 3000},
+        ],
+    }
+    with patch("r2r.accounting_agent.discovery.get_accounting_period_context", return_value={
+        "year": 2026, "period": 10, "is_open": True, "currency": "EUR",
+    }), patch("r2r.accounting_agent.discovery.get_organization_context", return_value={
+        "gl_accounts": {
+            "cost_gl_account_code": "6000",
+            "accrued_cost_gl_account_code": "2100",
+            "prepaid_gl_account_code": "1600",
+        },
+    }), patch("r2r.accounting_agent.discovery.get_historical_context", return_value={}), patch(
+        "r2r.accounting_agent.discovery.load_available_gl_accounts_for_agent", return_value=[],
+    ), patch(
+        "r2r.accounting_agent.discovery.load_existing_journals_for_supplier", return_value=[],
+    ), patch(
+        "r2r.accounting_agent.discovery.load_nova_po_gl_account_codes", return_value={},
+    ):
+        ctx = build_supplier_close_context(
+            {
+                "organization_id": "org-1",
+                "event_type": "month_end",
+                "occurred_at": "2026-10-31T12:00:00.000Z",
+            },
+            batch,
+            {"start_date": "2026-08-01", "end_date": "2026-10-31"},
+        )
+
+    assert ctx["po_context"].get("provider_purchase_order_id") is None
+    assert ctx["purchase_invoice_context"] == {}
+    assert "amount" not in ctx["derived_metrics"]
+    assert ctx["derived_metrics"]["current_period_key"] == "2026-10"
+    assert len(ctx["supplier_context"]["purchase_orders"]) == 2
+    assert len(ctx["supplier_context"]["purchase_invoices"]) == 2
+    assert ctx["supplier_context"]["purchase_invoices"][1]["amount"] == 3000
+
+
+def test_two_posts_are_kept_on_execution_state():
+    from r2r.accounting_agent.executor import create_default_business_tools
+    from r2r.accounting_agent.tools import create_initial_state, execute_agent_tool
+
+    ctx = _batch_context()
+    tools = create_default_business_tools(ctx, dry_run=True)
+    state = create_initial_state()
+    execute_agent_tool(
+        "release_prepaid_asset",
+        {
+            "amount": 1000,
+            "provider_purchase_invoice_id": "pinv-1",
+            "reason": "release PINV 1",
+            "description": "inv 1 | service 2026-08-01 to 2026-10-31",
+        },
+        ctx,
+        tools,
+        state,
+    )
+    execute_agent_tool(
+        "release_prepaid_asset",
+        {
+            "amount": 2000,
+            "provider_purchase_invoice_id": "pinv-2",
+            "reason": "release PINV 2",
+            "description": "inv 2 | service 2026-08-01 to 2026-10-31",
+        },
+        ctx,
+        tools,
+        state,
+    )
+    assert len(state["postedJournals"]) == 2
+    assert state["postedJournals"][0]["journal_proposal"]["amount"] == 1000
+    assert state["postedJournals"][1]["journal_proposal"]["amount"] == 2000
+    assert state["lastProposal"]["amount"] == 2000
+

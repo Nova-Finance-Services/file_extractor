@@ -71,8 +71,8 @@ def build_system_prompt(context: dict[str, Any]) -> str:
         "1. Read the close context for ONE supplier.",
         "2. Follow the policy knowledge base below (highest priority wins;",
         "   STANDING constraints always apply when relevant).",
-        "3. TAKE ACTION with tools (you may call several for different POs/PINVs).",
-        "4. Call `finalize` exactly once at the end.",
+        "3. TAKE ACTION with tools. Prefer several independent tool calls in the SAME round",
+        "   (one create/release per PO or PINV), then call `finalize` exactly once.",
         "Every tool call is saved as an activity step the user can review.",
         "Call tools to do the work; never describe actions you did not perform via tools.",
         "",
@@ -101,6 +101,12 @@ def build_system_prompt(context: dict[str, Any]) -> str:
         po_count = len(supplier.get("purchase_orders") or [])
         pinv_count = len(supplier.get("purchase_invoices") or [])
         lines.append(f"- Supplier in scope: {name} ({po_count} POs, {pinv_count} PINVs)")
+        if po_count or pinv_count:
+            lines.append(
+                "- Walk every document in supplier_context. po_context and "
+                "purchase_invoice_context are empty on supplier close. "
+                "derived_metrics has no amount — pass THIS document's amount and id on every tool call."
+            )
     return "\n".join(lines)
 
 

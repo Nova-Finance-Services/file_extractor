@@ -193,8 +193,14 @@ def _timeline(timeline: list[Any]) -> list[dict[str, Any]]:
 
 
 def _actions(execution: dict[str, Any]) -> list[dict[str, Any]]:
-    proposal = execution.get("journal_proposal") or {}
-    if not execution.get("provider_entry_id") and not proposal:
+    posted = [row for row in (execution.get("posted_journals") or []) if isinstance(row, dict)]
+    if not posted and (execution.get("provider_entry_id") or execution.get("journal_proposal")):
+        posted = [{
+            "provider_entry_id": execution.get("provider_entry_id"),
+            "entry_number": execution.get("entry_number"),
+            "journal_proposal": execution.get("journal_proposal") or {},
+        }]
+    if not posted:
         extra = []
         for step in execution.get("tool_timeline") or []:
             if isinstance(step, dict) and step.get("tool") in _POSTING_TOOLS and step.get("result"):
@@ -204,23 +210,28 @@ def _actions(execution: dict[str, Any]) -> list[dict[str, Any]]:
                     "result": step.get("result"),
                 })
         return extra
-    same_gl = bool(
-        proposal.get("debit_account")
-        and proposal.get("debit_account") == proposal.get("credit_account")
-    )
-    action = {
-        "kind": "journal",
-        "provider_entry_id": execution.get("provider_entry_id"),
-        "entry_number": execution.get("entry_number"),
-        "amount": proposal.get("amount"),
-        "currency": proposal.get("currency"),
-        "debit_account": proposal.get("debit_account"),
-        "credit_account": proposal.get("credit_account"),
-        "posting_date": proposal.get("posting_date"),
-        "description": proposal.get("description"),
-        "same_gl_both_legs": same_gl,
-    }
-    return [{k: v for k, v in action.items() if v not in (None, False)}]
+
+    actions: list[dict[str, Any]] = []
+    for item in posted:
+        proposal = item.get("journal_proposal") or {}
+        same_gl = bool(
+            proposal.get("debit_account")
+            and proposal.get("debit_account") == proposal.get("credit_account")
+        )
+        action = {
+            "kind": "journal",
+            "provider_entry_id": item.get("provider_entry_id"),
+            "entry_number": item.get("entry_number"),
+            "amount": proposal.get("amount"),
+            "currency": proposal.get("currency"),
+            "debit_account": proposal.get("debit_account"),
+            "credit_account": proposal.get("credit_account"),
+            "posting_date": proposal.get("posting_date"),
+            "description": proposal.get("description"),
+            "same_gl_both_legs": same_gl,
+        }
+        actions.append({k: v for k, v in action.items() if v not in (None, False)})
+    return actions
 
 
 def _review(raw: Any) -> dict[str, Any] | None:

@@ -32,7 +32,13 @@ def verify_execution(context: dict[str, Any], decision: dict[str, Any], executio
         "release_prepaid_asset",
     }
     required = decision.get("decision_type") in posting_decisions
-    has_entry = bool(execution.get("provider_entry_id")) if required else True
+    posted = [row for row in (execution.get("posted_journals") or []) if isinstance(row, dict)]
+    if not posted and execution.get("journal_proposal"):
+        posted = [{
+            "provider_entry_id": execution.get("provider_entry_id"),
+            "journal_proposal": execution.get("journal_proposal"),
+        }]
+    has_entry = bool(execution.get("provider_entry_id") or posted) if required else True
     checks.append({
         "check": "ERP entry reference",
         "passed": has_entry,
@@ -42,20 +48,26 @@ def verify_execution(context: dict[str, Any], decision: dict[str, Any], executio
             else "ERP entry id missing for a posting decision."
         ),
     })
-    proposal = execution.get("journal_proposal") or {}
-    debit = proposal.get("debit_account")
-    credit = proposal.get("credit_account")
-    if required and debit and credit:
-        balanced = debit != credit
-        checks.append({
-            "check": "Debit and credit accounts differ",
-            "passed": balanced,
-            "details": (
-                f"Posted {debit} / {credit}."
-                if balanced
-                else f"Both legs posted to {debit}; prepaid/accrual release must hit expense and balance-sheet GLs."
-            ),
-        })
+    proposals = [row.get("journal_proposal") or {} for row in posted]
+    if required and proposals:
+        same_gl = [
+            p for p in proposals
+            if p.get("debit_account") and p.get("debit_account") == p.get("credit_account")
+        ]
+        sample = same_gl[0] if same_gl else proposals[-1]
+        debit = sample.get("debit_account")
+        credit = sample.get("credit_account")
+        if debit and credit:
+            balanced = not same_gl
+            checks.append({
+                "check": "Debit and credit accounts differ",
+                "passed": balanced,
+                "details": (
+                    f"Posted {len(proposals)} journal(s); last {debit} / {credit}."
+                    if balanced
+                    else f"Both legs posted to {debit}; prepaid/accrual release must hit expense and balance-sheet GLs."
+                ),
+            })
     return {"success": all(c["passed"] for c in checks), "checks": checks}
 
 

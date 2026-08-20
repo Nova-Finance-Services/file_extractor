@@ -25,6 +25,92 @@ def resolve_effective_cost_gl_account(
     return {"costCode": default_cost, "rejectedOverride": tool_code, "source": "default"}
 
 
+def _supplier_docs(context: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    supplier = context.get("supplier_context") or {}
+    orders = [row for row in (supplier.get("purchase_orders") or []) if isinstance(row, dict)]
+    invoices = [row for row in (supplier.get("purchase_invoices") or []) if isinstance(row, dict)]
+    return orders, invoices
+
+
+def _find_po(context: dict[str, Any], po_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not po_id:
+        return None
+    orders, _ = _supplier_docs(context)
+    found = next((row for row in orders if row.get("provider_purchase_order_id") == po_id), None)
+    if found:
+        return found
+    po = context.get("po_context") or {}
+    if po.get("provider_purchase_order_id") == po_id:
+        return po
+    return None
+
+
+def _find_pinv(context: dict[str, Any], pinv_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not pinv_id:
+        return None
+    _, invoices = _supplier_docs(context)
+    found = next((row for row in invoices if row.get("provider_purchase_invoice_id") == pinv_id), None)
+    if found:
+        return found
+    pinv = context.get("purchase_invoice_context") or {}
+    if pinv.get("provider_purchase_invoice_id") == pinv_id:
+        return pinv
+    return None
+
+
+def _abs_amount(value: Any) -> float:
+    try:
+        return abs(float(value or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def resolve_posting_amount(
+    context: dict[str, Any],
+    decision_type: str,
+    opts: Optional[dict[str, Any]] = None,
+) -> float:
+    """Amount for THIS posting only. Never a supplier-batch total."""
+    opts = opts or {}
+    explicit = opts.get("amount")
+    if isinstance(explicit, (int, float)):
+        return abs(float(explicit))
+
+    if decision_type == "release_prepaid_asset":
+        return 0.0
+
+    po = _find_po(context, opts.get("provider_purchase_order_id") if isinstance(opts.get("provider_purchase_order_id"), str) else None)
+    pinv = _find_pinv(
+        context,
+        opts.get("provider_purchase_invoice_id") if isinstance(opts.get("provider_purchase_invoice_id"), str) else None,
+    )
+    if decision_type in {"create_cost_accrual", "release_existing_accrual"} and po:
+        return _abs_amount(po.get("amount"))
+    if decision_type == "create_prepaid_asset" and pinv:
+        return _abs_amount(pinv.get("amount"))
+    if po:
+        return _abs_amount(po.get("amount"))
+    if pinv:
+        return _abs_amount(pinv.get("amount"))
+
+    orders, invoices = _supplier_docs(context)
+    if len(orders) + len(invoices) > 1:
+        return 0.0
+
+    if decision_type in {"create_cost_accrual", "release_existing_accrual"}:
+        if len(orders) == 1:
+            return _abs_amount(orders[0].get("amount"))
+        return _abs_amount((context.get("po_context") or {}).get("amount"))
+    if decision_type == "create_prepaid_asset":
+        if len(invoices) == 1:
+            return _abs_amount(invoices[0].get("amount"))
+        return _abs_amount((context.get("purchase_invoice_context") or {}).get("amount"))
+    return _abs_amount(
+        (context.get("po_context") or {}).get("amount")
+        or (context.get("purchase_invoice_context") or {}).get("amount")
+    )
+
+
 def document_cost_gl_for_decision(
     context: dict[str, Any],
     decision_type: str,
@@ -93,25 +179,7 @@ def build_journal_proposal(
             None,
         )
 
-    derived_amount = opts.get("amount")
-    if derived_amount is None and decision_type == "release_prepaid_asset":
-        derived_amount = 0
-    if derived_amount is None:
-        derived_amount = (
-            (po_from_supplier or {}).get("amount")
-            or (pinv_from_supplier or {}).get("amount")
-            or context["po_context"].get("amount")
-            or context["purchase_invoice_context"].get("amount")
-            or 0
-        )
-    explicit = opts.get("amount")
-    if explicit is not None:
-        try:
-            amount = abs(float(explicit)) if float(explicit) != 0 else abs(float(derived_amount or 0))
-        except (TypeError, ValueError):
-            amount = abs(float(derived_amount or 0))
-    else:
-        amount = abs(float(derived_amount or 0))
+    amount = resolve_posting_amount(context, decision_type, opts)
 
     period = context["derived_metrics"]["current_period_key"]
     gl = context["organization_policy"]["gl_accounts"]
@@ -209,7 +277,9 @@ def build_journal_proposal(
     return {
         "description": linked,
         "amount": amount,
-        "currency": context["purchase_invoice_context"].get("currency")
+        "currency": (pinv_from_supplier or {}).get("currency")
+        or (po_from_supplier or {}).get("currency")
+        or context["purchase_invoice_context"].get("currency")
         or context["accounting_period"].get("currency")
         or "EUR",
         "debit_account": selected["debit_account"],
@@ -258,11 +328,16 @@ def create_default_business_tools(context: dict[str, Any], dry_run: bool) -> dic
 def build_execution_result_from_state(args: dict[str, Any]) -> dict[str, Any]:
     context = args["context"]
     action_log = args.get("actionLog") or []
+    posted = [row for row in (args.get("postedJournals") or []) if isinstance(row, dict)]
+    last = posted[-1] if posted else None
+    last_proposal = (last or {}).get("journal_proposal") or args.get("lastProposal")
     return {
         "success": args.get("success") if args.get("success") is not None else not args.get("error"),
-        "provider_entry_id": args.get("providerEntryId"),
-        "entry_number": args.get("entryNumber"),
-        "journal_proposal": args.get("lastProposal"),
+        "provider_entry_id": (last or {}).get("provider_entry_id") or args.get("providerEntryId"),
+        "entry_number": (last or {}).get("entry_number") if last else args.get("entryNumber"),
+        "journal_proposal": last_proposal,
+        "journal_proposals": [row.get("journal_proposal") for row in posted if row.get("journal_proposal")],
+        "posted_journals": posted,
         "tool_timeline": args.get("toolTimeline") or [],
         "action_log": action_log if action_log else ["No tool actions were taken."],
         "finance_controller_notifications": args.get("financeControllerNotifications") or [],

@@ -32,9 +32,8 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "When creating a cost accrual, always post the VAT-exclusive (net) amount only. Never include VAT in the journal amount — VAT is recoverable input tax, not a period cost. Prefer the ERP net amount on the PO/PINV. If only a VAT-inclusive/gross figure is available, subtract VAT before calling create_cost_accrual.",
         ],
         "evidence_paths": [
-            "derived_metrics.amount",
-            "po_context.amount",
-            "purchase_invoice_context.amount",
+            "supplier_context.purchase_orders",
+            "supplier_context.purchase_invoices",
         ],
         "preferred_tools": ["CreateJournalEntry"],
         "is_active": True,
@@ -49,12 +48,11 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "Never invent amounts. Use the PO/PINV net amount you act on, or the remaining prepaid you can see in existing_journals (setup minus releases, or PINV amount minus releases). On supplier batches do not use derived_metrics as a primary amount when multiple documents exist.",
+            "Never invent amounts. Use the PO/PINV net amount you act on, or the remaining prepaid you can see in existing_journals (setup minus releases, or PINV amount minus releases). On supplier batches do not use derived_metrics — it has no amount. Pass THIS document's amount and id on every tool call.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_orders",
             "supplier_context.purchase_invoices",
-            "derived_metrics.amount",
         ],
         "preferred_tools": [],
         "is_active": True,
@@ -73,7 +71,8 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         ],
         "evidence_paths": [
             "organization_policy.materiality_threshold",
-            "derived_metrics.amount",
+            "supplier_context.purchase_orders",
+            "supplier_context.purchase_invoices",
         ],
         "preferred_tools": ["RecordNoAction"],
         "is_active": True,
@@ -93,7 +92,8 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         ],
         "evidence_paths": [
             "organization_policy.requires_approval_above",
-            "derived_metrics.amount",
+            "supplier_context.purchase_orders",
+            "supplier_context.purchase_invoices",
         ],
         "preferred_tools": ["RequestApproval"],
         "is_active": False,
@@ -112,7 +112,8 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         ],
         "evidence_paths": [
             "organization_policy.requires_approval_above",
-            "derived_metrics.amount",
+            "supplier_context.purchase_orders",
+            "supplier_context.purchase_invoices",
         ],
         "preferred_tools": ["NotifyFinanceController"],
         "is_active": True,
@@ -127,7 +128,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "MULTI-DOCUMENT RUN: walk EVERY PO and EVERY PINV in supplier_context. Decide each document independently from its own fields + matching existing_journals (po:{id} / pinv:{id}). Call several create/release tools in one run if needed, then finalize once. On supplier batches, purchase_invoice_context and derived_metrics are intentionally empty/neutral — do NOT pick a primary invoice. Use supplier_context.purchase_invoices[*] amount, description, YourRef, and matching journals per id.",
+            "MULTI-DOCUMENT RUN: walk EVERY PO and EVERY PINV in supplier_context. Decide each document independently from its own fields + matching existing_journals (po:{id} / pinv:{id}). Call several create/release tools in one round if needed, then finalize once. On supplier close, po_context, purchase_invoice_context, and derived_metrics.amount are empty — do NOT pick a primary document. Use supplier_context.purchase_orders[*] / purchase_invoices[*] amount, description, YourRef, and matching journals per id.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_orders",
@@ -168,13 +169,9 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "evidence_paths": [
             "organization_policy.gl_accounts",
             "available_gl_accounts",
-            "po_context.gl_account_code",
-            "purchase_invoice_context.gl_account_code",
-            "existing_journals",
-            "po_context.description",
-            "purchase_invoice_context.description",
             "supplier_context.purchase_orders",
             "supplier_context.purchase_invoices",
+            "existing_journals",
         ],
         "preferred_tools": [],
         "is_active": True,
@@ -264,15 +261,14 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "confidence": 0.94,
         "requires_human_approval": False,
         "conditions": [
-            {"path": "po_context.invoice_received", "operator": "eq", "value": True},
+            {"path": "supplier_context.purchase_orders", "operator": "exists"},
         ],
         "reason_templates": [
-            "If existing_journals already show a cost accrual for this PO (and not yet released), release it because the invoice has now been received. Post the release in the same accounting period as the invoice. Pass provider_purchase_order_id when multiple POs are in scope.",
+            "If existing_journals already show a cost accrual for THIS PO (and not yet released), and that PO's invoice_received is true, release it. Post the release in the same accounting period as the invoice. Always pass provider_purchase_order_id for the PO you are releasing.",
         ],
         "evidence_paths": [
-            "po_context.provider_purchase_order_id",
+            "supplier_context.purchase_orders",
             "existing_journals",
-            "purchase_invoice_context.provider_purchase_invoice_id",
         ],
         "preferred_tools": ["ReverseJournalEntry", "CreateJournalEntry"],
         "is_active": True,
@@ -293,7 +289,6 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "evidence_paths": [
             "existing_journals",
             "supplier_context.purchase_invoices",
-            "purchase_invoice_context.provider_purchase_invoice_id",
             "derived_metrics.current_period_key",
         ],
         "preferred_tools": [
@@ -313,12 +308,10 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             {"path": "event.event_type", "operator": "in", "value": ["month_start", "month_end"]},
         ],
         "reason_templates": [
-            "When a PINV description/YourRef or matching prepaid journals show a multi-period service window and existing_journals do not already contain a prepaid setup for that pinv:{id}: create_prepaid_asset once for the full VAT-exclusive amount. Always set description with `inv <number> | service YYYY-MM-DD to YYYY-MM-DD` copied from that text. On supplier batches use supplier_context.purchase_invoices[*] per id — do not rely on purchase_invoice_context / derived_metrics when multiple PINVs exist.",
+            "When a PINV description/YourRef or matching prepaid journals show a multi-period service window and existing_journals do not already contain a prepaid setup for that pinv:{id}: create_prepaid_asset once for the full VAT-exclusive amount. Always set description with `inv <number> | service YYYY-MM-DD to YYYY-MM-DD` copied from that text. Evaluate per PINV from supplier_context.purchase_invoices[*] — never from purchase_invoice_context.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_invoices",
-            "purchase_invoice_context.provider_purchase_invoice_id",
-            "purchase_invoice_context.description",
             "existing_journals",
         ],
         "preferred_tools": [
@@ -335,18 +328,13 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "confidence": 0.95,
         "requires_human_approval": False,
         "conditions": [
-            {"path": "po_context.is_delivered", "operator": "eq", "value": True},
-            {"path": "po_context.invoice_received", "operator": "eq", "value": False},
-            {"path": "derived_metrics.amount", "operator": "gte", "value": 1},
+            {"path": "supplier_context.purchase_orders", "operator": "exists"},
         ],
         "reason_templates": [
-            "PO is delivered and not invoiced, so the period requires cost accrual recognition (VAT-exclusive amount) unless existing_journals already show that accrual for this PO — then record_no_action and do not notify. On supplier batches apply per PO in supplier_context.purchase_orders using that PO's amount and po:{id} journal matches. Skip when amount is below organization_policy.materiality_threshold.",
+            "For EACH PO in supplier_context.purchase_orders: if that PO is delivered and not invoiced, create_cost_accrual for THAT PO's VAT-exclusive amount unless existing_journals already show that accrual for po:{id} — then record_no_action and do not notify. Always pass provider_purchase_order_id and that PO's amount. Skip when that PO's amount is below organization_policy.materiality_threshold.",
         ],
         "evidence_paths": [
-            "po_context.purchase_order_id",
-            "po_context.delivery_date",
             "supplier_context.purchase_orders",
-            "derived_metrics.amount",
             "existing_journals",
         ],
         "preferred_tools": ["CreateJournalEntry"],
@@ -401,20 +389,13 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "confidence": 0.92,
         "requires_human_approval": False,
         "conditions": [
-            {"path": "po_context.purchase_order_id", "operator": "eq", "value": None},
-            {"path": "purchase_invoice_context.invoice_id", "operator": "exists"},
-            {
-                "path": "purchase_invoice_context.invoice_date",
-                "operator": "exists",
-            },
-            {"path": "derived_metrics.amount", "operator": "gte", "value": 1},
+            {"path": "supplier_context.purchase_invoices", "operator": "exists"},
         ],
         "reason_templates": [
-            "Service dates in the PINV description/YourRef point to a prior period and need a non-PO cost accrual (VAT-exclusive amount), unless existing_journals already cover it. Skip when amount is below organization_policy.materiality_threshold.",
+            "For EACH PINV in supplier_context.purchase_invoices: if service dates in that PINV's description/YourRef point to a prior period and there is no matching PO, create a non-PO cost accrual for THAT PINV's VAT-exclusive amount unless existing_journals already cover pinv:{id}. Always pass provider_purchase_invoice_id and that PINV's amount. Skip when that amount is below organization_policy.materiality_threshold.",
         ],
         "evidence_paths": [
-            "purchase_invoice_context.invoice_id",
-            "purchase_invoice_context.description",
+            "supplier_context.purchase_invoices",
             "derived_metrics.current_period_key",
             "existing_journals",
         ],

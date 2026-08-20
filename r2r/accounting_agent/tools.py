@@ -9,6 +9,7 @@ from r2r.accounting_agent.executor import (
     build_journal_proposal,
     document_cost_gl_for_decision,
     resolve_effective_cost_gl_account,
+    resolve_posting_amount,
 )
 
 # Human-approval workflow is off. Over-threshold accruals/prepaids notify the
@@ -38,14 +39,14 @@ AGENT_TOOLS = [
             "description": (
                 "Post a cost accrual journal (debit cost, credit accrued cost) for a "
                 "delivered-but-not-invoiced PO. Amount must be VAT-exclusive (net of VAT). "
-                "When supplier_context has multiple POs, pass provider_purchase_order_id."
+                "Always pass provider_purchase_order_id and that PO's amount from supplier_context."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "amount": {
                         "type": "number",
-                        "description": "Accrual amount VAT-exclusive (excl. VAT). Omit to use the document net amount.",
+                        "description": "Accrual amount VAT-exclusive (excl. VAT) for THIS PO only.",
                     },
                     "description": {"type": "string"},
                     "provider_purchase_order_id": {
@@ -246,6 +247,7 @@ def create_initial_state() -> dict[str, Any]:
         "toolSequence": [],
         "toolTimeline": [],
         "financeControllerNotifications": [],
+        "postedJournals": [],
     }
 
 
@@ -259,22 +261,34 @@ def _period_guard(context: dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _threshold_guard(context: dict[str, Any], decision_type: str, args: dict[str, Any]) -> Optional[str]:
+def _threshold_guard(context: dict[str, Any], decision_type: str, amount: float) -> Optional[str]:
     if HUMAN_APPROVAL_ENABLED or decision_type not in _OVER_THRESHOLD_POSTING:
         return None
-    amount = args.get("amount") if isinstance(args.get("amount"), (int, float)) else context["derived_metrics"]["amount"]
     limit = context["organization_policy"]["requires_approval_above"]
     try:
-        amount_n = float(amount or 0)
         limit_n = float(limit)
     except (TypeError, ValueError):
         return None
-    if amount_n < limit_n:
+    if amount < limit_n:
         return None
     return (
-        f"REJECTED: amount {amount_n} is at/above finance-controller threshold {limit_n}. "
+        f"REJECTED: amount {amount} is at/above finance-controller threshold {limit_n}. "
         "Do not post this accrual/prepaid. Call notify_finance_controller with amount, "
         "document id, and the booking you would have made so the finance controller can do it."
+    )
+
+
+def _amount_guard(decision_type: str, amount: float) -> Optional[str]:
+    if amount > 0:
+        return None
+    if decision_type == "release_prepaid_asset":
+        return (
+            "REJECTED: pass amount as the current-period slice from THIS PINV plus matching "
+            "prepaid journals (setup minus releases). Do not omit amount and do not use a supplier total."
+        )
+    return (
+        "REJECTED: pass amount for THIS PO/PINV (and its provider_*_id). "
+        "Do not use a supplier-total or derived_metrics.amount."
     )
 
 
@@ -315,7 +329,10 @@ def _post(
     args: dict[str, Any],
     verb: str,
 ) -> dict[str, Any]:
-    blocked = _period_guard(context) or _threshold_guard(context, decision_type, args)
+    blocked = _period_guard(context)
+    amount = resolve_posting_amount(context, decision_type, args)
+    blocked = blocked or _amount_guard(decision_type, amount)
+    blocked = blocked or _threshold_guard(context, decision_type, amount)
     if blocked:
         if "at/above finance-controller threshold" in blocked:
             _push_finance_notification(state, context, "notify", blocked, {
@@ -356,32 +373,14 @@ def _post(
         message = (
             f"Ignored invalid cost_gl_account_code {rejected}; used document or org default cost GL instead."
         )
-        _push_finance_notification(
-            state,
-            context,
-            "notify",
-            message,
-            {
-                "provider_purchase_order_id": args.get("provider_purchase_order_id")
-                if isinstance(args.get("provider_purchase_order_id"), str)
-                else None,
-                "provider_purchase_invoice_id": args.get("provider_purchase_invoice_id")
-                if isinstance(args.get("provider_purchase_invoice_id"), str)
-                else None,
-            },
-        )
-        tools["notifyFinanceController"](message, {
-            "cost_gl_account_code": rejected,
-            "provider_purchase_order_id": args.get("provider_purchase_order_id"),
-            "provider_purchase_invoice_id": args.get("provider_purchase_invoice_id"),
-            "provider_supplier_id": (context.get("supplier_context") or {}).get("provider_supplier_id"),
-        })
+        state["actionLog"].append(message)
+        _record_timeline(state, {"tool": tool_name, "result": message})
 
     proposal = build_journal_proposal(
         context,
         decision_type,
         {
-            "amount": args.get("amount") if isinstance(args.get("amount"), (int, float)) else None,
+            "amount": amount,
             "description": args.get("description") if isinstance(args.get("description"), str) else None,
             "provider_purchase_order_id": args.get("provider_purchase_order_id")
             if isinstance(args.get("provider_purchase_order_id"), str)
@@ -394,9 +393,15 @@ def _post(
     )
     try:
         result = runner(proposal)
-        state["providerEntryId"] = result["provider_entry_id"]
-        state["entryNumber"] = result.get("entry_number")
-        state["lastProposal"] = result["journal_proposal"]
+        posted = {
+            "provider_entry_id": result["provider_entry_id"],
+            "entry_number": result.get("entry_number"),
+            "journal_proposal": result["journal_proposal"],
+        }
+        state.setdefault("postedJournals", []).append(posted)
+        state["providerEntryId"] = posted["provider_entry_id"]
+        state["entryNumber"] = posted.get("entry_number")
+        state["lastProposal"] = posted["journal_proposal"]
         line = (
             f"{verb} in ERP entry {result['provider_entry_id']} for {proposal['amount']} "
             f"{proposal['currency']} (DR {proposal['debit_account']} / CR {proposal['credit_account']})"
@@ -494,8 +499,13 @@ def execute_agent_tool(
         _record_timeline(state, {"tool": name, "args": args, "result": reason})
         return {"content": f"OK: recorded no action ({reason})"}
     if name == "finalize":
-        amount = context["derived_metrics"]["amount"]
-        over_threshold = amount >= context["organization_policy"]["requires_approval_above"]
+        over_threshold = False
+        if HUMAN_APPROVAL_ENABLED:
+            amount = resolve_posting_amount(context, str(args.get("decision_type") or "no_action"), args)
+            try:
+                over_threshold = amount >= float(context["organization_policy"]["requires_approval_above"])
+            except (TypeError, ValueError):
+                over_threshold = False
         reason = args.get("reason")
         decision_type = args.get("decision_type") or "no_action"
         if not HUMAN_APPROVAL_ENABLED and decision_type == "request_human_approval":

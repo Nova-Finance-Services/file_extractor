@@ -176,7 +176,6 @@ def build_supplier_close_context(
             "supplier_name": batch.get("supplier_name"),
         },
     }
-    total_po_amount = sum(float(po.get("amount") or 0) for po in batch.get("purchase_orders") or [])
     missing_fields: list[str] = []
     document_refs = [
         *[po["provider_purchase_order_id"] for po in batch.get("purchase_orders") or []],
@@ -206,23 +205,8 @@ def build_supplier_close_context(
         for pinv in batch.get("purchase_invoices") or []
     ]
 
-    if len(enriched_pinvs) == 1:
-        only = enriched_pinvs[0]
-        purchase_invoice_context = {
-            "provider_purchase_invoice_id": only["provider_purchase_invoice_id"],
-            "invoice_date": only.get("invoice_date"),
-            "amount": _abs_amount(only.get("amount")),
-            "description": only.get("description"),
-            "your_ref": only.get("your_ref"),
-            "currency": only.get("currency") or "EUR",
-            **({"gl_account_code": only["gl_account_code"]} if only.get("gl_account_code") else {}),
-        }
-    else:
-        purchase_invoice_context = {}
-
-    single_pinv = enriched_pinvs[0] if len(enriched_pinvs) == 1 else None
-    derived_amount = _abs_amount(total_po_amount) or (_abs_amount(single_pinv.get("amount")) if single_pinv else 0)
-    first_po = purchase_orders_with_gl[0] if purchase_orders_with_gl else None
+    # Never promote a first PO/PINV into general context. The model must
+    # decide from supplier_context[*] per document.
     return {
         "event": supplier_event,
         "accounting_period": accounting_period,
@@ -235,19 +219,8 @@ def build_supplier_close_context(
             "purchase_orders": purchase_orders_with_gl,
             "purchase_invoices": enriched_pinvs,
         },
-        "po_context": {
-            "provider_purchase_order_id": first_po["provider_purchase_order_id"],
-            "order_number": first_po.get("order_number"),
-            "is_delivered": first_po.get("is_delivered"),
-            "is_closed": False,
-            "delivery_date": first_po.get("receipt_date"),
-            "erp_synced": True,
-            "invoice_received": first_po.get("invoice_received"),
-            "amount": _abs_amount(first_po.get("amount")),
-            "supplier": batch.get("supplier_name"),
-            "gl_account_code": first_po.get("gl_account_code"),
-        } if first_po else _empty_po_context(),
-        "purchase_invoice_context": purchase_invoice_context,
+        "po_context": _empty_po_context(),
+        "purchase_invoice_context": {},
         "existing_journals": existing_journals,
         "history": historical_context,
         "data_quality": {
@@ -255,10 +228,9 @@ def build_supplier_close_context(
             "is_complete": len(missing_fields) == 0,
         },
         "derived_metrics": {
-            "amount": derived_amount,
             "current_period_key": current_period_key,
             "po_count": len(purchase_orders_with_gl),
-            "pinv_count": len(batch.get("purchase_invoices") or []),
+            "pinv_count": len(enriched_pinvs),
         },
         "policy_knowledge": policy_knowledge,
     }

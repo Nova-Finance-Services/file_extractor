@@ -16,6 +16,7 @@ def _execution_from_state(context: dict[str, Any], state: dict[str, Any]) -> dic
         "toolTimeline": state.get("toolTimeline") or [],
         "actionLog": state.get("actionLog") or [],
         "lastProposal": state.get("lastProposal"),
+        "postedJournals": state.get("postedJournals") or [],
         "providerEntryId": state.get("providerEntryId"),
         "entryNumber": state.get("entryNumber"),
         "financeControllerNotifications": state.get("financeControllerNotifications") or [],
@@ -41,6 +42,8 @@ def _infer_decision_type(state: dict[str, Any]) -> str:
     tools = [s["tool"] for s in state.get("toolSequence") or []]
     if "CreatePrepaidJournal" in tools:
         return "create_prepaid_asset"
+    if "ReversePrepaidJournal" in tools:
+        return "release_prepaid_asset"
     if "ReverseJournalEntry" in tools:
         return "release_existing_accrual"
     if "CreateJournalEntry" in tools:
