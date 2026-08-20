@@ -29,7 +29,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "When creating a cost accrual, always post the VAT-exclusive (net) amount only. Never include VAT in the journal amount — VAT is recoverable input tax, not a period cost. Prefer Exact AmountDC/AmountFC (excl. VAT). If only a VAT-inclusive/gross figure is available, subtract VAT before calling create_cost_accrual.",
+            "When creating a cost accrual, always post the VAT-exclusive (net) amount only. Never include VAT in the journal amount — VAT is recoverable input tax, not a period cost. Prefer the ERP net amount on the PO/PINV. If only a VAT-inclusive/gross figure is available, subtract VAT before calling create_cost_accrual.",
         ],
         "evidence_paths": [
             "derived_metrics.amount",
@@ -41,7 +41,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
     },
     {
         "id": "standing_amounts_from_documents",
-        "name": "Do not invent amounts — use document or tool values",
+        "name": "Do not invent amounts — use document and journal values",
         "decision_type": "no_action",
         "priority": 100,
         "confidence": 1,
@@ -49,7 +49,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "Never invent amounts. Use the PO/PINV net amount you act on, or get_prepaid_status.suggested_release for prepaid releases. On supplier batches do not use derived_metrics as a primary amount when multiple documents exist.",
+            "Never invent amounts. Use the PO/PINV net amount you act on, or the remaining prepaid you can see in existing_journals (setup minus releases, or PINV amount minus releases). On supplier batches do not use derived_metrics as a primary amount when multiple documents exist.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_orders",
@@ -127,7 +127,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "MULTI-DOCUMENT RUN: walk EVERY PO and EVERY PINV in supplier_context. Decide each document independently from its own fields + matching existing_journals (po:{id} / pinv:{id}). Call several create/release tools in one run if needed, then finalize once. On supplier batches, purchase_invoice_context and prepaid fields on derived_metrics are intentionally empty/neutral — do NOT pick a primary invoice. Use only supplier_context.purchase_invoices[*] (amount, service_period_*, invoice_months_covered, prepaid_monthly_release_amount) per id.",
+            "MULTI-DOCUMENT RUN: walk EVERY PO and EVERY PINV in supplier_context. Decide each document independently from its own fields + matching existing_journals (po:{id} / pinv:{id}). Call several create/release tools in one run if needed, then finalize once. On supplier batches, purchase_invoice_context and derived_metrics are intentionally empty/neutral — do NOT pick a primary invoice. Use supplier_context.purchase_invoices[*] amount, description, YourRef, and matching journals per id.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_orders",
@@ -163,7 +163,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "standing_constraint": True,
         "conditions": [],
         "reason_templates": [
-            "Cost GL priority for the expense leg: (1) document GL when present and in available_gl_accounts — Nova purchase_orders.glaccount_code for PO accruals/releases, Exact PurchaseEntryLine GLAccountCode for PINV prepaid create/release; (2) else optional cost_gl_account_code on the tool when evidence clearly supports another catalog code; (3) else organization_policy.gl_accounts.cost_gl_account_code. Never invent GL codes. Accrued-cost and prepaid balance-sheet accounts always stay on org defaults — do not try to override them.",
+            "Cost GL priority for the expense leg: (1) document GL when present and in available_gl_accounts — Nova purchase_orders.glaccount_code for PO accruals/releases, PINV line GL on prepaid create/release; (2) else optional cost_gl_account_code on the tool when evidence clearly supports another catalog code; (3) else organization_policy.gl_accounts.cost_gl_account_code. Never invent GL codes. Accrued-cost and prepaid balance-sheet accounts always stay on org defaults — do not try to override them.",
         ],
         "evidence_paths": [
             "organization_policy.gl_accounts",
@@ -181,7 +181,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
     },
     {
         "id": "standing_prepaid_lifecycle",
-        "name": "Prepaid lifecycle procedure (create once, release via status tool)",
+        "name": "Prepaid lifecycle (create once, release from journal/PINV history)",
         "decision_type": "release_prepaid_asset",
         "priority": 97,
         "confidence": 1,
@@ -190,9 +190,11 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
         "conditions": [],
         "reason_templates": [
             "Prepaid lifecycle — apply PER PINV. Example: 3000 invoice for Aug–Oct → create prepaid 3000 once, then release 1000 in Aug/Sep/Oct. Example: 12000 annual Jan–Dec → create 12000 once if no setup in journals; if setup exists, release the current-month slice only.",
+            "Read existing_journals tagged pinv:{id} (prepaid setup and later monthly releases) together with supplier_context.purchase_invoices description, YourRef, and amount. That history is the source of truth — service window, original setup, and remaining balance are already in that text. Use it; do not wait for a parsed date field.",
             "Create prepaid ONCE only when journals do NOT already show a prepaid setup for THAT PINV. Different PINVs need separate tool calls — never release PINV A using PINV B's id or amount.",
-            "Before ANY release_prepaid_asset: call get_prepaid_status with that provider_purchase_invoice_id and use suggested_release as the amount. If can_release is false, or flags include service_dates_missing_or_unclear / no_prepaid_setup_found (e.g. prepaid booked outside Nova with no inv/service/pinv metadata): do NOT release — call notify_finance_controller with a clear message (stored for the finance controller inbox). If remaining is 0 / fully_released: record_no_action. On last_service_month_true_up, release the full remaining.",
-            "Always pass description on create/release prepaid with inv number and full service window, e.g. `inv 12345 | service 2026-08-01 to 2026-12-31` (copy from get_prepaid_status when the PINV is outside the close window).",
+            "If prepaid setup already exists (including when the original setup journal is outside the close window but later release journals and the PINV are in context): call release_prepaid_asset for the current-period slice only. Amount = remaining / months left, or the usual monthly slice from prior releases. If remaining is 0 or this period is already released: record_no_action. On the last service month, release the full remaining.",
+            "Notify finance controller only if PINV text and prepaid journals still give you no service window and no way to compute remaining. Do not notify because a parsed date field is missing.",
+            "Always pass description on create/release prepaid with inv number and full service window, e.g. `inv 12345 | service 2026-08-01 to 2026-12-31`, copied from the PINV or prepaid journal text.",
         ],
         "evidence_paths": [
             "existing_journals",
@@ -200,7 +202,6 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.current_period_key",
         ],
         "preferred_tools": [
-            "GetPrepaidStatus",
             "CreatePrepaidJournal",
             "CreateJournalEntry",
             "NotifyFinanceController",
@@ -287,7 +288,7 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             {"path": "event.event_type", "operator": "in", "value": ["month_start", "month_end"]},
         ],
         "reason_templates": [
-            "When journals (or supplier_context PINVs) indicate an open prepaid for a PINV whose service covers the current period: call get_prepaid_status, then release_prepaid_asset with suggested_release. Do not recreate the prepaid asset. If can_release is false or metadata is missing, notify_finance_controller instead. On supplier batches evaluate per PINV from supplier_context + journals, not derived_metrics.",
+            "When journals (or supplier_context PINVs) indicate an open prepaid for a PINV whose service covers the current period: call release_prepaid_asset for the current-period slice. Read the remaining balance and service window from existing_journals plus PINV description/YourRef — do not recreate the prepaid asset. Empty structured date fields do not matter if the text has the window. On supplier batches evaluate per PINV from supplier_context + journals, not derived_metrics.",
         ],
         "evidence_paths": [
             "existing_journals",
@@ -296,7 +297,6 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             "derived_metrics.current_period_key",
         ],
         "preferred_tools": [
-            "GetPrepaidStatus",
             "CreateJournalEntry",
             "NotifyFinanceController",
         ],
@@ -313,13 +313,12 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             {"path": "event.event_type", "operator": "in", "value": ["month_start", "month_end"]},
         ],
         "reason_templates": [
-            "When a PINV spans multiple accounting periods (invoice_months_covered > 1 on that PINV) and existing_journals do not already contain a prepaid setup for that pinv:{id}: create_prepaid_asset once for the full VAT-exclusive amount. Always set description with `inv <number> | service YYYY-MM-DD to YYYY-MM-DD`. On supplier batches use supplier_context.purchase_invoices[*] per id — do not rely on purchase_invoice_context / derived_metrics when multiple PINVs exist.",
+            "When a PINV description/YourRef or matching prepaid journals show a multi-period service window and existing_journals do not already contain a prepaid setup for that pinv:{id}: create_prepaid_asset once for the full VAT-exclusive amount. Always set description with `inv <number> | service YYYY-MM-DD to YYYY-MM-DD` copied from that text. On supplier batches use supplier_context.purchase_invoices[*] per id — do not rely on purchase_invoice_context / derived_metrics when multiple PINVs exist.",
         ],
         "evidence_paths": [
             "supplier_context.purchase_invoices",
             "purchase_invoice_context.provider_purchase_invoice_id",
-            "purchase_invoice_context.service_period_start",
-            "purchase_invoice_context.service_period_end",
+            "purchase_invoice_context.description",
             "existing_journals",
         ],
         "preferred_tools": [
@@ -405,18 +404,17 @@ DEFAULT_POLICY_RULES: list[dict[str, Any]] = [
             {"path": "po_context.purchase_order_id", "operator": "eq", "value": None},
             {"path": "purchase_invoice_context.invoice_id", "operator": "exists"},
             {
-                "path": "purchase_invoice_context.service_period_start",
-                "operator": "not_starts_with",
-                "value": "{{derived_metrics.current_period_key}}",
+                "path": "purchase_invoice_context.invoice_date",
+                "operator": "exists",
             },
             {"path": "derived_metrics.amount", "operator": "gte", "value": 1},
         ],
         "reason_templates": [
-            "Service invoice points to a prior period and needs a non-PO cost accrual (VAT-exclusive amount), unless existing_journals already cover it. Skip when amount is below organization_policy.materiality_threshold.",
+            "Service dates in the PINV description/YourRef point to a prior period and need a non-PO cost accrual (VAT-exclusive amount), unless existing_journals already cover it. Skip when amount is below organization_policy.materiality_threshold.",
         ],
         "evidence_paths": [
             "purchase_invoice_context.invoice_id",
-            "purchase_invoice_context.service_period_start",
+            "purchase_invoice_context.description",
             "derived_metrics.current_period_key",
             "existing_journals",
         ],

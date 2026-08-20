@@ -8,7 +8,7 @@ from conftest import auth_headers
 TEST_ORG_ID = "5c06415f-4c8c-4972-b23c-5c66b85845c4"
 TEST_SUPPLIER_IDS = ["c6aec698-d5bf-4d21-b9ad-47882ca68443","c08bb7e9-1201-4a69-bc1e-df294204589f","fee53397-bbb7-4d22-9b71-73473dcb078a"]
 TEST_DRY_RUN = False
-TEST_OCCURRED_AT = "2026-09-03T12:00:00.000Z"
+TEST_OCCURRED_AT = "2026-10-03T12:00:00.000Z"
 TEST_EVENT_TYPE = "month_start"
 TEST_ENVIRONMENT = "dev"
 TEST_BUSINESS_EVENT_TYPE = "month_end_org_close"
@@ -204,6 +204,43 @@ def test_org_close_writes_one_memory_row(mock_insert):
 
 
 @patch("r2r.accounting_agent.memory.supabase_rest.insert")
+def test_org_close_memory_dedupes_copied_notifications(mock_insert):
+    from r2r.accounting_agent.memory import store_run_memory
+
+    note = {
+        "kind": "notify",
+        "message": "Blocked October prepaid review",
+        "provider_supplier_id": TEST_SUPPLIER_IDS[0],
+        "provider_purchase_invoice_id": None,
+        "at": "2026-08-20T10:07:56.240228+00:00",
+    }
+    store_run_memory(
+        event={
+            "organization_id": TEST_ORG_ID,
+            "event_type": TEST_EVENT_TYPE,
+            "occurred_at": TEST_OCCURRED_AT,
+        },
+        results=[
+            {
+                "provider_supplier_id": TEST_SUPPLIER_IDS[0],
+                "success": True,
+                "decision": {"decision_type": "escalate_to_finance_controller", "confidence": 0.99},
+                "execution": {"success": True, "tool_timeline": [], "finance_controller_notifications": [note]},
+                "finance_controller_notifications": [note],
+            },
+        ],
+        accounting_period={"year": 2026, "period": 10, "currency": "EUR"},
+        request_id="req-dup",
+        task_id="task-dup",
+    )
+
+    row = mock_insert.call_args.args[1]
+    assert row["notify_count"] == 1
+    assert len(row["notifications"]) == 1
+    assert row["notifications"][0]["message"] == "Blocked October prepaid review"
+
+
+@patch("r2r.accounting_agent.memory.supabase_rest.insert")
 def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
     from r2r.accounting_agent.memory import store_run_memory
 
@@ -239,9 +276,9 @@ def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
                     "tool_timeline": [
                         {
                             "at": "2026-08-20T08:59:52Z",
-                            "tool": "get_prepaid_status",
-                            "args": {"reason": "check remaining", "provider_purchase_invoice_id": "pinv-1"},
-                            "result": '{"setup_amount": 7260.0, "remaining": 4840.0, "suggested_release": 2420.0}',
+                            "tool": "release_prepaid_asset",
+                            "args": {"reason": "September slice can be released.", "amount": 2420.0, "provider_purchase_invoice_id": "pinv-1"},
+                            "result": "Released prepaid into cost",
                         },
                         {
                             "tool": "finalize",
@@ -271,14 +308,15 @@ def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
     item = row["items"][0]
     assert item["actions"][0]["same_gl_both_legs"] is True
     assert item["actions"][0]["debit_account"] == "2302"
-    assert item["facts"]["prepaid_status"]["remaining"] == 4840.0
+    assert "facts" not in item
     assert item["reason"] == ["September slice can be released."]
     assert item["review"]["approved"] is False
     assert item["review"]["concerns"] == ["Debit and credit are both GL 2302."]
     assert item["checks"]["passed"] is False
     assert "explanation" not in item
     prepaid_step = item["timeline"][0]
-    assert prepaid_step["reason"] == "check remaining"
+    assert prepaid_step["tool"] == "release_prepaid_asset"
+    assert prepaid_step["reason"] == "September slice can be released."
     assert "reason" not in prepaid_step["args"]
     finalize = item["timeline"][1]
     assert finalize["tool"] == "finalize"
@@ -310,4 +348,4 @@ def test_skipped_run_writes_memory_row(mock_insert):
     assert row["item_count"] == 0
     assert row["title"] == "Month start close skipped"
     assert "outside configured" in row["summary"]
-    assert row["period_key"] == "2026-09"
+    assert row["period_key"] == "2026-10"

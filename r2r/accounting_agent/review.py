@@ -37,9 +37,9 @@ def verify_execution(context: dict[str, Any], decision: dict[str, Any], executio
         "check": "ERP entry reference",
         "passed": has_entry,
         "details": (
-            "Exact entry id present for posting decisions."
+            "ERP entry id present for posting decisions."
             if has_entry
-            else "Exact entry id missing for a posting decision."
+            else "ERP entry id missing for a posting decision."
         ),
     })
     proposal = execution.get("journal_proposal") or {}

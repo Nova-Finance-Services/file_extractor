@@ -95,9 +95,7 @@ def build_journal_proposal(
 
     derived_amount = opts.get("amount")
     if derived_amount is None and decision_type == "release_prepaid_asset":
-        derived_amount = (pinv_from_supplier or {}).get("prepaid_monthly_release_amount")
-        if derived_amount is None:
-            derived_amount = context["derived_metrics"].get("prepaid_monthly_release_amount")
+        derived_amount = 0
     if derived_amount is None:
         derived_amount = (
             (po_from_supplier or {}).get("amount")

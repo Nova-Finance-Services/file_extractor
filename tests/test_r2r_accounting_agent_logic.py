@@ -1,15 +1,14 @@
 """Unit tests for prepaid status and journal proposal helpers."""
 from r2r.accounting_agent.executor import build_journal_proposal, resolve_effective_cost_gl_account
-from r2r.accounting_agent.gl_codes import pick_primary_gl_account_code_from_entry_lines
 from r2r.accounting_agent.policies import (
     DEFAULT_POLICY_RULES,
     NOTIFY_FINANCE_CONTROLLER_POLICY_IDS,
     apply_notify_flags,
 )
 from r2r.accounting_agent.llm_chat import messages_to_responses_input, parse_responses_output
-from r2r.accounting_agent.prepaid_status import get_prepaid_status, parse_prepaid_desc_meta
 from r2r.accounting_agent.prompts import render_notify_index, render_policies
 from r2r.accounting_agent.run import is_event_within_configured_window
+from r2r.accounting_agent.tools import get_agent_tools
 
 
 def _base_context(**overrides):
@@ -70,167 +69,57 @@ def _base_context(**overrides):
     return ctx
 
 
-def test_parse_prepaid_desc_meta():
-    parsed = parse_prepaid_desc_meta(
-        "Prepaid release 2026-09 | inv 12345 | service 2026-08-01 to 2026-10-31 | pinv:abc",
-    )
-    assert parsed["entry_number"] == 12345
-    assert parsed["service_period_start"] == "2026-08-01"
-    assert parsed["service_period_end"] == "2026-10-31"
+def test_map_purchase_invoice_keeps_description_text():
+    from provider.exact.close import map_purchase_invoice
+
+    mapped = map_purchase_invoice({
+        "EntryID": "527836fb-7f90-4554-80d2-ed9045b1806f",
+        "EntryDate": "2026-08-03T00:00:00",
+        "Description": "Consulting retainer 2026-08-01 to 2026-10-31",
+        "YourRef": "inv 26600033",
+        "AmountFC": 7260,
+        "Currency": "EUR",
+    })
+    assert mapped["description"] == "Consulting retainer 2026-08-01 to 2026-10-31"
+    assert mapped["your_ref"] == "inv 26600033"
+    assert mapped["amount"] == 7260
+    assert mapped["provider_purchase_invoice_id"] == "527836fb-7f90-4554-80d2-ed9045b1806f"
+    assert "service_period_start" not in mapped
+    assert "service_period_end" not in mapped
 
 
-def test_prepaid_status_suggests_monthly_release():
-    pinv_id = "pinv-guid-1"
-    ctx = _base_context(
-        existing_journals=[
-            {
-                "id": "1",
-                "date": "2026-07-31",
-                "amount_dc": 3000,
-                "role": "prepaid",
-                "description": f"Prepaid setup 2026-07 | inv 99 | service 2026-08-01 to 2026-10-31 | pinv:{pinv_id}",
-            },
-            {
-                "id": "2",
-                "date": "2026-08-31",
-                "amount_dc": -1000,
-                "role": "prepaid",
-                "description": f"Prepaid release 2026-08 | inv 99 | service 2026-08-01 to 2026-10-31 | pinv:{pinv_id}",
-            },
-        ],
-    )
-    status = get_prepaid_status(ctx, pinv_id)
-    assert status["setup_amount"] == 3000
-    assert status["released_to_date"] == 1000
-    assert status["remaining"] == 2000
-    assert status["suggested_release"] == 1000
-    assert status["can_release"] is True
-    assert status["inv_number"] == 99
-    assert status["released_this_period"] is False
+def test_agent_tools_omit_prepaid_status():
+    names = [t['function']['name'] for t in get_agent_tools()]
+    assert 'get_prepaid_status' not in names
+    assert 'release_prepaid_asset' in names
+    release = next(t for t in get_agent_tools() if t['function']['name'] == 'release_prepaid_asset')
+    assert 'get_prepaid_status' not in release['function']['description']
 
 
-def test_prepaid_status_does_not_treat_setup_credit_as_full_release():
-    """Setup memorial has +prepaid / -cost with the same PINV tag and no 'Prepaid setup' wording."""
+def test_notify_extracts_pinv_id_from_message():
+    from r2r.accounting_agent.tools import create_initial_state, execute_agent_tool
+
     pinv_id = "527836fb-7f90-4554-80d2-ed9045b1806f"
-    desc = f"inv INV-LM-2026-0731 | service 2026-08-01 to 2026-10-31 | PI | pinv:{pinv_id}"
     ctx = _base_context(
-        supplier_context={
-            "provider_supplier_id": "c6aec698-d5bf-4d21-b9ad-47882ca68443",
-            "supplier_name": "Lumen Advisory B.V.",
-            "purchase_orders": [],
-            "purchase_invoices": [
-                {
-                    "provider_purchase_invoice_id": pinv_id,
-                    "amount": 7260,
-                    "service_period_start": "2026-08-01",
-                    "service_period_end": "2026-10-31",
-                    "invoice_months_covered": 3,
-                    "prepaid_monthly_release_amount": 2420,
-                    "service_covers_current_period": True,
-                }
-            ],
-        },
-        existing_journals=[
-            {
-                "id": "debit",
-                "entry_id": "setup-entry",
-                "date": "2026-07-31",
-                "amount_dc": 7260,
-                "role": "prepaid",
-                "description": desc,
-                "notes": f"pinv:{pinv_id}",
-            },
-            {
-                "id": "credit",
-                "entry_id": "setup-entry",
-                "date": "2026-07-31",
-                "amount_dc": -7260,
-                "role": "cost",
-                "description": desc,
-                "notes": f"pinv:{pinv_id}",
-            },
-        ],
+        supplier_context={"provider_supplier_id": "c6aec698-d5bf-4d21-b9ad-47882ca68443"},
+        purchase_invoice_context={},
     )
-    status = get_prepaid_status(ctx, pinv_id)
-    assert status["setup_amount"] == 7260
-    assert status["released_to_date"] == 0
-    assert status["remaining"] == 7260
-    assert status["suggested_release"] == 2420
-    assert status["can_release"] is True
-    assert "fully_released" not in status["flags"]
-
-
-def test_prepaid_status_true_up_last_month():
-    pinv_id = "pinv-guid-2"
-    ctx = _base_context(
-        event={
-            "event_type": "month_end",
-            "organization_id": "org-1",
-            "occurred_at": "2026-10-31T12:00:00.000Z",
+    state = create_initial_state()
+    execute_agent_tool(
+        "notify_finance_controller",
+        {
+            "message": (
+                f"Blocked October prepaid review for PINV {pinv_id} (invoice 26600033): "
+                "no prepaid setup was found."
+            ),
         },
-        accounting_period={
-            "year": 2026,
-            "period": 10,
-            "is_open": True,
-            "currency": "EUR",
-            "previous_period": {"year": 2026, "period": 9},
-        },
-        derived_metrics={
-            "amount": 0,
-            "invoice_months_covered": 0,
-            "prepaid_monthly_release_amount": 0,
-            "service_covers_current_period": False,
-            "current_period_key": "2026-10",
-        },
-        existing_journals=[
-            {
-                "id": "1",
-                "date": "2026-07-31",
-                "amount_dc": 3000,
-                "role": "prepaid",
-                "description": f"Prepaid setup 2026-07 | inv 99 | service 2026-08-01 to 2026-10-31 | pinv:{pinv_id}",
-            },
-            {
-                "id": "2",
-                "date": "2026-08-31",
-                "amount_dc": -1000,
-                "role": "prepaid",
-                "description": f"Prepaid release 2026-08 | inv 99 | service 2026-08-01 to 2026-10-31 | pinv:{pinv_id}",
-            },
-            {
-                "id": "3",
-                "date": "2026-09-30",
-                "amount_dc": -1000,
-                "role": "prepaid",
-                "description": f"Prepaid release 2026-09 | inv 99 | service 2026-08-01 to 2026-10-31 | pinv:{pinv_id}",
-            },
-        ],
+        ctx,
+        {"notifyFinanceController": lambda *_args, **_kwargs: None},
+        state,
     )
-    status = get_prepaid_status(ctx, pinv_id)
-    assert status["remaining"] == 1000
-    assert status["is_last_service_month"] is True
-    assert status["suggested_release"] == 1000
-    assert status["can_release"] is True
-    assert "last_service_month_true_up" in status["flags"]
-
-
-def test_prepaid_status_blocks_unclear_dates():
-    pinv_id = "pinv-guid-3"
-    ctx = _base_context(
-        existing_journals=[
-            {
-                "id": "1",
-                "date": "2026-07-31",
-                "amount_dc": 3000,
-                "role": "prepaid",
-                "description": f"Prepaid setup 2026-07 | pinv:{pinv_id}",
-            },
-        ],
-    )
-    status = get_prepaid_status(ctx, pinv_id)
-    assert status["setup_amount"] == 3000
-    assert status["can_release"] is False
-    assert "service_dates_missing_or_unclear" in status["flags"]
+    note = state["financeControllerNotifications"][0]
+    assert note["provider_purchase_invoice_id"] == pinv_id
+    assert note["kind"] == "notify"
 
 
 def test_journal_proposal_default_and_override():
@@ -300,8 +189,10 @@ def test_journal_proposal_prefers_document_gl():
     assert proposal["debit_account"] == "7100"
 
 
-def test_pick_primary_gl_from_entry_lines():
-    code = pick_primary_gl_account_code_from_entry_lines({
+def test_pick_pinv_gl_from_entry_lines():
+    from provider.exact.close import pick_pinv_gl_account_code
+
+    code = pick_pinv_gl_account_code({
         "PurchaseEntryLines": {
             "results": [
                 {"GLAccountCode": "5520", "AmountFC": 100},
@@ -347,6 +238,9 @@ def test_notify_finance_controller_policy_ids():
     rendered = render_policies(tagged)
     assert "[notify=yes]" in rendered
     assert "[notify=no]" in rendered
+    assert "get_prepaid_status" not in rendered
+    assert "That history is the source of truth" in rendered
+    assert "Do not notify because a parsed date field is missing" in rendered
 
 
 def test_messages_to_responses_input_roundtrip():
@@ -359,20 +253,20 @@ def test_messages_to_responses_input_roundtrip():
             "tool_calls": [{
                 "id": "call_1",
                 "type": "function",
-                "function": {"name": "get_prepaid_status", "arguments": "{\"reason\":\"check\"}"},
+                "function": {"name": "release_prepaid_asset", "arguments": "{\"reason\":\"release September\"}"},
             }],
         },
-        {"role": "tool", "tool_call_id": "call_1", "content": "{\"remaining\": 6000}"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "OK: released"},
     ])
     assert instructions == "You are the agent."
     assert items[0] == {"role": "user", "content": "Close this supplier."}
     assert items[1]["type"] == "function_call"
     assert items[1]["call_id"] == "call_1"
-    assert items[1]["name"] == "get_prepaid_status"
+    assert items[1]["name"] == "release_prepaid_asset"
     assert items[2] == {
         "type": "function_call_output",
         "call_id": "call_1",
-        "output": "{\"remaining\": 6000}",
+        "output": "OK: released",
     }
 
 

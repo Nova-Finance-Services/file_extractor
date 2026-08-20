@@ -1,32 +1,16 @@
-"""ERP-agnostic routing (mirrors Backend _shared/provider/close-candidates.ts).
+"""ERP-agnostic routing.
 
-Agent / chatbot code should import from `provider` or `provider.router`, not from
-Exact modules directly. Add a new branch here when onboarding another ERP.
+Agents import from `provider.router` only. Exact field names, OData, division tokens,
+and status codes stay in `provider.exact`. Add a branch here when onboarding another ERP.
 """
 from __future__ import annotations
 
 from typing import Any, Optional
 
-from provider.exact import (
-    ExactMemorialPostError,
-    PO_STATUS_CANCELLED,
-    PO_STATUS_COMPLETE,
-    get_financial_period_for_date,
-    get_gl_account_guid_by_code,
-    get_gl_accounts,
-    get_organization_connection,
-    get_purchase_entries,
-    get_purchase_entry,
-    get_purchase_order,
-    get_purchase_orders,
-    get_reporting_year_and_period,
-    list_journal_entry_lines,
-    normalize_exact_date,
-    post_general_journal_entry,
-)
+from provider.errors import ErpUnsupportedError
 from r2r import supabase_rest
 
-ErpProviderName = str  # "exact" today; add "twinfield" etc. later
+ErpProviderName = str
 
 
 def resolve_organization_erp_provider(organization_id: str) -> Optional[ErpProviderName]:
@@ -43,107 +27,121 @@ def resolve_organization_erp_provider(organization_id: str) -> Optional[ErpProvi
     return "exact" if row else None
 
 
-def _require_provider(organization_id: str) -> ErpProviderName:
-    provider = resolve_organization_erp_provider(organization_id)
-    if not provider:
-        raise RuntimeError(f"No ERP connection for organization {organization_id}")
-    return provider
+def _provider(organization_id: str) -> Optional[ErpProviderName]:
+    return resolve_organization_erp_provider(organization_id)
 
 
-def _unsupported(provider: str, action: str) -> None:
-    raise RuntimeError(f"Unsupported ERP provider for {action}: {provider}")
+def _require(organization_id: str, action: str) -> ErpProviderName:
+    name = _provider(organization_id)
+    if name == "exact":
+        return name
+    if not name:
+        raise ErpUnsupportedError(f"No ERP connection for organization {organization_id}")
+    raise ErpUnsupportedError(f"Unsupported ERP provider for {action}: {name}")
 
 
-def erp_get_connection(organization_id: str) -> dict[str, Any]:
-    provider = resolve_organization_erp_provider(organization_id)
-    if provider == "exact":
-        return get_organization_connection(organization_id)
-    if not provider:
-        return {"connected": False, "error": f"No connection found for organization {organization_id}"}
-    _unsupported(provider, "get_connection")
-    return {"connected": False, "error": "unsupported"}
+def erp_list_supplier_document_batches(organization_id: str, window: dict[str, str]) -> list[dict[str, Any]]:
+    if not _provider(organization_id):
+        return []
+    if _require(organization_id, "list_supplier_document_batches") == "exact":
+        from provider.exact.close import list_supplier_document_batches
+        return list_supplier_document_batches(organization_id, window)
+    return []
 
 
-def erp_get_purchase_order(organization_id: str, purchase_order_id: str, select: Optional[str] = None):
-    if _require_provider(organization_id) == "exact":
-        return get_purchase_order(organization_id, purchase_order_id, select=select)
-    _unsupported("unknown", "get_purchase_order")
+def erp_get_purchase_order(organization_id: str, provider_po_id: str) -> Optional[dict[str, Any]]:
+    if _require(organization_id, "get_purchase_order") == "exact":
+        from provider.exact.close import get_purchase_order_for_close
+        return get_purchase_order_for_close(organization_id, provider_po_id)
+    return None
 
 
-def erp_get_purchase_orders(organization_id: str, **kwargs):
-    if _require_provider(organization_id) == "exact":
-        return get_purchase_orders(organization_id, **kwargs)
-    _unsupported("unknown", "get_purchase_orders")
+def erp_get_purchase_invoice(organization_id: str, provider_pinv_id: str) -> Optional[dict[str, Any]]:
+    if _require(organization_id, "get_purchase_invoice") == "exact":
+        from provider.exact.close import get_purchase_invoice_for_close
+        return get_purchase_invoice_for_close(organization_id, provider_pinv_id)
+    return None
 
 
-def erp_get_purchase_entry(organization_id: str, entry_id: str):
-    if _require_provider(organization_id) == "exact":
-        return get_purchase_entry(organization_id, entry_id)
-    _unsupported("unknown", "get_purchase_entry")
+def erp_get_accounting_period(organization_id: str, date_iso: str) -> Optional[dict[str, Any]]:
+    if not _provider(organization_id):
+        return None
+    if _require(organization_id, "get_accounting_period") == "exact":
+        from provider.exact.close import get_accounting_period
+        return get_accounting_period(organization_id, date_iso)
+    return None
 
 
-def erp_get_purchase_entries(organization_id: str, **kwargs):
-    if _require_provider(organization_id) == "exact":
-        return get_purchase_entries(organization_id, **kwargs)
-    _unsupported("unknown", "get_purchase_entries")
+def erp_list_journal_lines(
+    organization_id: str,
+    *,
+    start_date: str,
+    end_date: str,
+    gl_account_codes: list[str],
+    provider_supplier_id: Optional[str] = None,
+    document_refs: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    if not _provider(organization_id):
+        return []
+    if _require(organization_id, "list_journal_lines") == "exact":
+        from provider.exact.close import list_close_journal_lines
+        return list_close_journal_lines(
+            organization_id,
+            start_date=start_date,
+            end_date=end_date,
+            gl_account_codes=gl_account_codes,
+            provider_supplier_id=provider_supplier_id,
+            document_refs=document_refs,
+        )
+    return []
 
 
-def erp_get_gl_accounts(organization_id: str, access_token: str, division: int):
-    if _require_provider(organization_id) == "exact":
-        return get_gl_accounts(organization_id, access_token, division)
-    _unsupported("unknown", "get_gl_accounts")
+def erp_list_supplier_ids_with_gl_activity(
+    organization_id: str,
+    *,
+    start_date: str,
+    end_date: str,
+    gl_account_codes: list[str],
+) -> list[str]:
+    if not _provider(organization_id):
+        return []
+    if _require(organization_id, "list_supplier_ids_with_gl_activity") == "exact":
+        from provider.exact.close import list_supplier_ids_with_gl_activity
+        return list_supplier_ids_with_gl_activity(
+            organization_id,
+            start_date=start_date,
+            end_date=end_date,
+            gl_account_codes=gl_account_codes,
+        )
+    return []
 
 
-def erp_get_gl_account_guid_by_code(organization_id: str, code_or_guid: str):
-    if _require_provider(organization_id) == "exact":
-        return get_gl_account_guid_by_code(organization_id, code_or_guid)
-    _unsupported("unknown", "get_gl_account_guid_by_code")
+def erp_list_gl_accounts(organization_id: str, default_codes: list[str]) -> list[dict[str, Any]]:
+    if not _provider(organization_id):
+        return [{"code": c, "description": c} for c in default_codes if c]
+    if _require(organization_id, "list_gl_accounts") == "exact":
+        from provider.exact.close import list_gl_accounts_for_agent
+        return list_gl_accounts_for_agent(organization_id, default_codes)
+    return [{"code": c, "description": c} for c in default_codes if c]
 
 
-def erp_list_journal_entry_lines(**kwargs):
-    organization_id = kwargs.pop("organization_id", None)
-    if organization_id:
-        provider = _require_provider(organization_id)
-        if provider != "exact":
-            _unsupported(provider, "list_journal_entry_lines")
-    return list_journal_entry_lines(**kwargs)
-
-
-def erp_post_journal_entry(organization_id: str, **kwargs):
-    if _require_provider(organization_id) == "exact":
-        return post_general_journal_entry(**kwargs)
-    _unsupported("unknown", "post_journal_entry")
-
-
-def erp_get_financial_period_for_date(organization_id: str, division: int, access_token: str, date_iso: str):
-    if _require_provider(organization_id) == "exact":
-        return get_financial_period_for_date(division, access_token, date_iso)
-    _unsupported("unknown", "get_financial_period")
-
-
-def erp_get_reporting_year_and_period(organization_id: str, division: int, access_token: str, date_iso: str):
-    if _require_provider(organization_id) == "exact":
-        return get_reporting_year_and_period(division, access_token, date_iso)
-    _unsupported("unknown", "get_reporting_year_and_period")
-
-
-# Re-export Exact-only helpers that callers still need until a second ERP exists.
-__all__ = [
-    "ErpProviderName",
-    "ExactMemorialPostError",
-    "PO_STATUS_CANCELLED",
-    "PO_STATUS_COMPLETE",
-    "erp_get_connection",
-    "erp_get_financial_period_for_date",
-    "erp_get_gl_account_guid_by_code",
-    "erp_get_gl_accounts",
-    "erp_get_purchase_entries",
-    "erp_get_purchase_entry",
-    "erp_get_purchase_order",
-    "erp_get_purchase_orders",
-    "erp_get_reporting_year_and_period",
-    "erp_list_journal_entry_lines",
-    "erp_post_journal_entry",
-    "normalize_exact_date",
-    "resolve_organization_erp_provider",
-]
+def erp_post_memorial_journal(
+    organization_id: str,
+    *,
+    journal_code: str,
+    proposal: dict[str, Any],
+    provider_supplier_id: Optional[str] = None,
+    provider_purchase_order_id: Optional[str] = None,
+    provider_purchase_invoice_id: Optional[str] = None,
+) -> dict[str, Any]:
+    if _require(organization_id, "post_memorial_journal") == "exact":
+        from provider.exact.close import post_memorial_journal
+        return post_memorial_journal(
+            organization_id,
+            journal_code=journal_code,
+            proposal=proposal,
+            provider_supplier_id=provider_supplier_id,
+            provider_purchase_order_id=provider_purchase_order_id,
+            provider_purchase_invoice_id=provider_purchase_invoice_id,
+        )
+    raise ErpUnsupportedError("Unsupported ERP provider for post_memorial_journal")

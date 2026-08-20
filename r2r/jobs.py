@@ -20,7 +20,7 @@ def _id_list(value: Any) -> list[str]:
 
 
 def resolve_forced_supplier_ids(payload: dict[str, Any] | None) -> list[str]:
-    """Exact supplier GUIDs from payload.provider_supplier_ids and/or provider_supplier_id."""
+    """Supplier ids from payload.provider_supplier_ids and/or provider_supplier_id."""
     payload = payload or {}
     ids = _id_list(payload.get("provider_supplier_ids"))
     for sid in _id_list(payload.get("provider_supplier_id")):

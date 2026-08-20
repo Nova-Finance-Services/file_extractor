@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -146,7 +145,6 @@ def _item(result: dict[str, Any]) -> dict[str, Any]:
     review = _review(result.get("llm_review"))
     llm = _llm(result.get("llm_info"))
     actions = _actions(execution)
-    prepaid = _prepaid_status(execution)
     success = result.get("success") is not False and execution.get("success") is not False
     item: dict[str, Any] = {
         "subject_type": "supplier",
@@ -165,7 +163,6 @@ def _item(result: dict[str, Any]) -> dict[str, Any]:
         },
         "review": review,
         "llm": llm,
-        "facts": {"prepaid_status": prepaid} if prepaid else {},
         "timeline": _timeline(execution.get("tool_timeline") or []),
     }
     return {key: value for key, value in item.items() if value not in (None, [], {})}
@@ -182,11 +179,6 @@ def _timeline(timeline: list[Any]) -> list[dict[str, Any]]:
         if isinstance(reason, list):
             reason = next((part for part in reason if part), None)
         result = step.get("result")
-        if isinstance(result, str) and result.startswith("{") and tool == "get_prepaid_status":
-            try:
-                result = json.loads(result)
-            except json.JSONDecodeError:
-                pass
         entry: dict[str, Any] = {"at": step.get("at"), "tool": tool}
         if reason:
             entry["reason"] = reason
@@ -231,22 +223,6 @@ def _actions(execution: dict[str, Any]) -> list[dict[str, Any]]:
     return [{k: v for k, v in action.items() if v not in (None, False)}]
 
 
-def _prepaid_status(execution: dict[str, Any]) -> dict[str, Any] | None:
-    for step in execution.get("tool_timeline") or []:
-        if not isinstance(step, dict) or step.get("tool") != "get_prepaid_status":
-            continue
-        result = step.get("result")
-        if isinstance(result, dict):
-            return result
-        if isinstance(result, str):
-            try:
-                parsed = json.loads(result)
-            except json.JSONDecodeError:
-                return None
-            return parsed if isinstance(parsed, dict) else None
-    return None
-
-
 def _review(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -283,9 +259,22 @@ def _needs_attention(item: dict[str, Any]) -> bool:
 
 def _collect_notifications(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     notifications: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
     for result in results:
-        notifications.extend(result.get("finance_controller_notifications") or [])
-        notifications.extend((result.get("execution") or {}).get("finance_controller_notifications") or [])
+        raw = result.get("finance_controller_notifications")
+        if not raw:
+            raw = (result.get("execution") or {}).get("finance_controller_notifications") or []
+        for item in raw:
+            key = (
+                item.get("kind"),
+                item.get("message"),
+                item.get("provider_supplier_id"),
+                item.get("provider_purchase_invoice_id"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            notifications.append(item)
     return notifications
 
 

@@ -1,7 +1,7 @@
 """Agent tool schemas and execution."""
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -10,7 +10,6 @@ from r2r.accounting_agent.executor import (
     document_cost_gl_for_decision,
     resolve_effective_cost_gl_account,
 )
-from r2r.accounting_agent.prepaid_status import get_prepaid_status
 
 # Human-approval workflow is off. Over-threshold accruals/prepaids notify the
 # finance controller (agent_memory.finance_controller_notifications) instead.
@@ -25,7 +24,7 @@ _COST_GL = {
     "type": "string",
     "description": (
         "Optional expense GL from available_gl_accounts. Document GL is preferred first "
-        "(Nova glaccount_code on PO; Exact line GL on PINV). Use this only when the document "
+        "(Nova glaccount_code on PO; PINV line GL on prepaid). Use this only when the document "
         "has no GL and evidence points to another catalog code. Accrued-cost and prepaid GLs "
         "always stay on org defaults."
     ),
@@ -51,7 +50,7 @@ AGENT_TOOLS = [
                     "description": {"type": "string"},
                     "provider_purchase_order_id": {
                         "type": "string",
-                        "description": "Exact PO id from supplier_context.purchase_orders.",
+                        "description": "ERP PO id from supplier_context.purchase_orders.",
                     },
                     "cost_gl_account_code": _COST_GL,
                     "reason": _REASON,
@@ -77,29 +76,6 @@ AGENT_TOOLS = [
                     "reason": _REASON,
                 },
                 "required": ["reason"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_prepaid_status",
-            "description": (
-                "Read-only: compute prepaid balance for one PINV from existing_journals "
-                "(setup, released_to_date, remaining, service dates, suggested_release). "
-                "Call this BEFORE release_prepaid_asset. If service dates are unclear or "
-                "can_release is false, notify finance controller instead of releasing."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "provider_purchase_invoice_id": {
-                        "type": "string",
-                        "description": "Exact PINV id (from supplier_context or pinv:{id} in journal descriptions).",
-                    },
-                    "reason": _REASON,
-                },
-                "required": ["provider_purchase_invoice_id", "reason"],
             },
         },
     },
@@ -138,17 +114,17 @@ AGENT_TOOLS = [
             "name": "release_prepaid_asset",
             "description": (
                 "Amortize prepaid into cost for the CURRENT period only (debit cost, credit prepaid). "
-                "ALWAYS call get_prepaid_status first and use its suggested_release as amount. "
-                "Pass provider_purchase_invoice_id. Set description with inv # + service window from the "
-                "status result. If can_release is false or service dates unclear, do not post — "
-                "notify_finance_controller instead."
+                "Read existing_journals (prepaid setup/release for this pinv:{id}) and the PINV "
+                "description/YourRef/amount yourself — that history already has the service window "
+                "and remaining balance. Pass provider_purchase_invoice_id. Set description with "
+                "inv # + service window from that same text."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "amount": {
                         "type": "number",
-                        "description": "Period slice to release; must be get_prepaid_status.suggested_release.",
+                        "description": "Current-period slice from PINV + prepaid journal history (setup minus releases already posted).",
                     },
                     "description": {
                         "type": "string",
@@ -422,7 +398,7 @@ def _post(
         state["entryNumber"] = result.get("entry_number")
         state["lastProposal"] = result["journal_proposal"]
         line = (
-            f"{verb} in Exact entry {result['provider_entry_id']} for {proposal['amount']} "
+            f"{verb} in ERP entry {result['provider_entry_id']} for {proposal['amount']} "
             f"{proposal['currency']} (DR {proposal['debit_account']} / CR {proposal['credit_account']})"
         )
         state["actionLog"].append(line)
@@ -450,21 +426,6 @@ def execute_agent_tool(
     if name == "create_prepaid_asset":
         state["toolSequence"].append({"tool": "CreatePrepaidJournal", "action": "Book prepaid asset"})
         return _post(context, tools, state, name, "create_prepaid_asset", tools["createPrepaidJournal"], args, "Booked prepaid asset")
-    if name == "get_prepaid_status":
-        state["toolSequence"].append({"tool": "GetPrepaidStatus", "action": "Compute prepaid balance"})
-        pinv_id = str(args.get("provider_purchase_invoice_id") or "").strip()
-        if not pinv_id:
-            msg = "ERROR: provider_purchase_invoice_id is required"
-            _record_timeline(state, {"tool": name, "args": args, "result": msg})
-            return {"content": msg}
-        status = get_prepaid_status(context, pinv_id)
-        line = (
-            f"Prepaid status for {pinv_id}: remaining={status['remaining']}, "
-            f"suggested_release={status['suggested_release']}, can_release={status['can_release']}"
-        )
-        state["actionLog"].append(line)
-        _record_timeline(state, {"tool": name, "args": args, "result": json.dumps(status)})
-        return {"content": json.dumps(status)}
     if name == "release_prepaid_asset":
         state["toolSequence"].append({"tool": "ReversePrepaidJournal", "action": "Release prepaid asset"})
         return _post(context, tools, state, name, "release_prepaid_asset", tools["createJournalEntry"], args, "Released prepaid into cost")
@@ -502,7 +463,23 @@ def execute_agent_tool(
     if name == "notify_finance_controller":
         state["toolSequence"].append({"tool": "NotifyFinanceController", "action": "Notify"})
         message = str(args.get("message") or "")
-        _push_finance_notification(state, context, "notify", message)
+        extra = {
+            "provider_purchase_order_id": args.get("provider_purchase_order_id")
+            if isinstance(args.get("provider_purchase_order_id"), str)
+            else None,
+            "provider_purchase_invoice_id": args.get("provider_purchase_invoice_id")
+            if isinstance(args.get("provider_purchase_invoice_id"), str)
+            else None,
+        }
+        if not extra["provider_purchase_invoice_id"]:
+            tagged = re.search(
+                r"pinv[:\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+                message,
+                re.I,
+            )
+            if tagged:
+                extra["provider_purchase_invoice_id"] = tagged.group(1)
+        _push_finance_notification(state, context, "notify", message, extra)
         tools["notifyFinanceController"](message, {
             "provider_supplier_id": (context.get("supplier_context") or {}).get("provider_supplier_id"),
         })
