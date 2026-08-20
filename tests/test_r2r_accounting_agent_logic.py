@@ -6,6 +6,7 @@ from r2r.accounting_agent.policies import (
     NOTIFY_FINANCE_CONTROLLER_POLICY_IDS,
     apply_notify_flags,
 )
+from r2r.accounting_agent.llm_chat import messages_to_responses_input, parse_responses_output
 from r2r.accounting_agent.prepaid_status import get_prepaid_status, parse_prepaid_desc_meta
 from r2r.accounting_agent.prompts import render_notify_index, render_policies
 from r2r.accounting_agent.run import is_event_within_configured_window
@@ -346,4 +347,51 @@ def test_notify_finance_controller_policy_ids():
     rendered = render_policies(tagged)
     assert "[notify=yes]" in rendered
     assert "[notify=no]" in rendered
+
+
+def test_messages_to_responses_input_roundtrip():
+    instructions, items = messages_to_responses_input([
+        {"role": "system", "content": "You are the agent."},
+        {"role": "user", "content": "Close this supplier."},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_prepaid_status", "arguments": "{\"reason\":\"check\"}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "{\"remaining\": 6000}"},
+    ])
+    assert instructions == "You are the agent."
+    assert items[0] == {"role": "user", "content": "Close this supplier."}
+    assert items[1]["type"] == "function_call"
+    assert items[1]["call_id"] == "call_1"
+    assert items[1]["name"] == "get_prepaid_status"
+    assert items[2] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "{\"remaining\": 6000}",
+    }
+
+
+def test_parse_responses_output_function_call():
+    parsed = parse_responses_output({
+        "output_text": "",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call_abc",
+                "name": "finalize",
+                "arguments": {"decision_type": "no_action", "confidence": 0.9},
+            }
+        ],
+    })
+    assert parsed["toolCalls"] == [{
+        "id": "call_abc",
+        "name": "finalize",
+        "arguments": '{"decision_type": "no_action", "confidence": 0.9}',
+    }]
+    assert parsed["content"] is None
 

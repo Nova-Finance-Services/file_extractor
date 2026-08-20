@@ -36,26 +36,101 @@ def _openai():
     return _openai_client
 
 
-def _call_openai(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str) -> dict[str, Any]:
-    # gpt-5.6-sol (and similar) default reasoning_effort, which chat.completions
-    # rejects when function tools are present. Force none so tool calls work.
-    completion = _openai().chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-        extra_body={"reasoning_effort": "none"},
-    )
-    msg = completion.choices[0].message
-    tool_calls = []
-    for tc in msg.tool_calls or []:
-        if getattr(tc, "type", None) == "function" and getattr(tc, "function", None):
-            tool_calls.append({
-                "id": str(tc.id),
-                "name": str(tc.function.name),
-                "arguments": tc.function.arguments if isinstance(tc.function.arguments, str) else "{}",
+def _item_get(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = fn.get("name")
+        if not name:
+            continue
+        converted.append({
+            "type": "function",
+            "name": name,
+            "description": fn.get("description") or "",
+            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return converted
+
+
+def messages_to_responses_input(messages: list[dict[str, Any]]) -> tuple[Optional[str], list[dict[str, Any]]]:
+    """Chat-style messages → Responses API (instructions, input items)."""
+    instructions: list[str] = []
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            if message.get("content"):
+                instructions.append(str(message["content"]))
+            continue
+        if role == "user":
+            items.append({"role": "user", "content": message.get("content") or ""})
+            continue
+        if role == "assistant":
+            if message.get("content"):
+                items.append({"role": "assistant", "content": message["content"]})
+            for tc in message.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("id"),
+                    "name": fn.get("name"),
+                    "arguments": fn.get("arguments") or "{}",
+                })
+            continue
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": message.get("tool_call_id"),
+                "output": message.get("content") or "",
             })
-    return {"content": msg.content, "toolCalls": tool_calls}
+    return ("\n\n".join(instructions) or None), items
+
+
+def parse_responses_output(response: Any) -> dict[str, Any]:
+    """Map Responses API output to the chat loop shape {content, toolCalls}."""
+    tool_calls: list[dict[str, Any]] = []
+    texts: list[str] = []
+    for item in _item_get(response, "output") or []:
+        item_type = _item_get(item, "type")
+        if item_type == "function_call":
+            arguments = _item_get(item, "arguments") or "{}"
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments)
+            tool_calls.append({
+                "id": str(_item_get(item, "call_id") or _item_get(item, "id") or ""),
+                "name": str(_item_get(item, "name") or ""),
+                "arguments": arguments,
+            })
+            continue
+        if item_type == "message":
+            for block in _item_get(item, "content") or []:
+                if _item_get(block, "type") in {"output_text", "text"} and _item_get(block, "text"):
+                    texts.append(str(_item_get(block, "text")))
+    content = "".join(texts) or _item_get(response, "output_text") or None
+    if content is not None and not str(content).strip():
+        content = None
+    return {"content": content, "toolCalls": tool_calls}
+
+
+def _call_openai(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str) -> dict[str, Any]:
+    # gpt-5.6-sol supports function tools + reasoning on the Responses API, not chat.completions.
+    instructions, input_items = messages_to_responses_input(messages)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_items,
+        "tools": _responses_tools(tools),
+        "tool_choice": "auto",
+    }
+    if instructions:
+        kwargs["instructions"] = instructions
+    response = _openai().with_options(timeout=180).responses.create(**kwargs)
+    return parse_responses_output(response)
 
 
 def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
