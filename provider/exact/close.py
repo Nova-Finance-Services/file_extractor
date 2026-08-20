@@ -34,7 +34,7 @@ _PINV_PAGE_SIZE = 200
 _MAX_PAGES = 10
 _PO_SELECT = (
     "PurchaseOrderID,OrderNumber,OrderDate,ReceiptDate,ReceiptStatus,InvoiceStatus,"
-    "AmountDC,AmountFC,Currency,Supplier,SupplierName,Description,CostCenter"
+    "AmountDC,AmountFC,Currency,Supplier,SupplierName,Description"
 )
 _PINV_SELECT = (
     "EntryID,EntryNumber,EntryDate,Description,AmountFC,AmountDC,Currency,"
@@ -91,7 +91,6 @@ def map_purchase_order(row: dict[str, Any]) -> Optional[dict[str, Any]]:
         "currency": row.get("Currency") if isinstance(row.get("Currency"), str) else None,
         "description": row.get("Description") if isinstance(row.get("Description"), str) else None,
         "supplier": row.get("SupplierName") if isinstance(row.get("SupplierName"), str) else None,
-        "cost_center": row.get("CostCenter") if isinstance(row.get("CostCenter"), str) else None,
         "provider_supplier_id": str(row.get("Supplier") or "").strip() or None,
         "supplier_name": row.get("SupplierName") if isinstance(row.get("SupplierName"), str) else None,
     }
