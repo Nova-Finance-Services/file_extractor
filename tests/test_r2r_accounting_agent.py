@@ -135,9 +135,9 @@ class TestR2rAccountingAgentEnqueue:
 
 @patch("r2r.accounting_agent.memory.supabase_rest.insert")
 def test_org_close_writes_one_memory_row(mock_insert):
-    from r2r.accounting_agent.memory import store_org_close_memory
+    from r2r.accounting_agent.memory import store_run_memory
 
-    store_org_close_memory(
+    store_run_memory(
         event={
             "organization_id": TEST_ORG_ID,
             "event_type": TEST_EVENT_TYPE,
@@ -148,10 +148,15 @@ def test_org_close_writes_one_memory_row(mock_insert):
                 "provider_supplier_id": TEST_SUPPLIER_IDS[0],
                 "supplier_name": "Acme",
                 "success": True,
-                "decision": {"decision_type": "create_cost_accrual", "confidence": 0.9},
+                "decision": {
+                    "decision_type": "create_cost_accrual",
+                    "confidence": 0.9,
+                    "reason": ["PO delivered, not invoiced."],
+                    "evidence": ["PO 12"],
+                },
                 "execution": {
                     "success": True,
-                    "tool_timeline": [{"tool": "create_cost_accrual"}],
+                    "tool_timeline": [{"tool": "create_cost_accrual", "args": {"reason": "accrue PO"}}],
                     "finance_controller_notifications": [],
                     "action_log": ["posted"],
                 },
@@ -168,37 +173,41 @@ def test_org_close_writes_one_memory_row(mock_insert):
                 "finance_controller_notifications": [],
             },
         ],
-        accounting_period={"year": 2026, "period": 7},
+        accounting_period={"year": 2026, "period": 7, "currency": "EUR"},
+        request_id="req-1",
+        task_id="task-1",
     )
 
     mock_insert.assert_called_once()
     table, row = mock_insert.call_args.args[0], mock_insert.call_args.args[1]
     assert table == "agent_memory"
     assert row["organization_id"] == TEST_ORG_ID
-    assert row["decision_type"] == "org_close"
-    assert row["context_snapshot"]["supplier_count"] == 2
-    assert row["context_snapshot"]["period_key"] == "2026-07"
-    assert row["execution_plan"]["supplier_count"] == 2
-    assert row["execution_plan"]["decision_types"] == ["create_cost_accrual", "no_action"]
-    suppliers = row["execution_result"]["suppliers"]
-    assert len(suppliers) == 2
-    assert suppliers[0]["provider_supplier_id"] == TEST_SUPPLIER_IDS[0]
-    assert suppliers[0]["decision_type"] == "create_cost_accrual"
-    assert "explanation" not in suppliers[0]
-    assert "decision" not in suppliers[0]
-    assert "action_log" not in (suppliers[0]["execution"] or {})
-    assert len(row["finance_controller_notifications"]) == 1
-    assert row["explanation"]["decision"] == "org_close"
-    assert "2 supplier run(s)" in row["explanation"]["summary"]
-    assert row["explanation"]["confidence"] == 0.8
-    assert row["verification_result"]["review_rejected_supplier_ids"] == []
+    assert row["status"] == "completed"
+    assert row["period_key"] == "2026-07"
+    assert row["decision_types"] == ["create_cost_accrual", "no_action"]
+    assert row["item_count"] == 2
+    assert row["notify_count"] == 1
+    assert row["confidence"] == 0.8
+    assert "decision_type" not in row
+    assert "execution_plan" not in row
+    assert "execution_result" not in row
+    items = row["items"]
+    assert items[0]["subject_id"] == TEST_SUPPLIER_IDS[0]
+    assert items[0]["decision_type"] == "create_cost_accrual"
+    assert items[0]["reason"] == ["PO delivered, not invoiced."]
+    assert items[0]["timeline"][0]["reason"] == "accrue PO"
+    assert "action_log" not in items[0]
+    assert "explanation" not in items[0]
+    assert len(row["notifications"]) == 1
+    assert "2 supplier run(s)" in row["summary"]
+    assert row["attention_count"] == 0
 
 
 @patch("r2r.accounting_agent.memory.supabase_rest.insert")
 def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
-    from r2r.accounting_agent.memory import store_org_close_memory
+    from r2r.accounting_agent.memory import store_run_memory
 
-    store_org_close_memory(
+    store_run_memory(
         event={
             "organization_id": TEST_ORG_ID,
             "event_type": TEST_EVENT_TYPE,
@@ -241,7 +250,17 @@ def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
                         },
                     ],
                 },
-                "llm_review": {"approved": False, "summary": "Same GL both legs."},
+                "verification": {
+                    "success": False,
+                    "checks": [
+                        {"check": "Debit and credit accounts differ", "passed": False, "details": "Both 2302"},
+                    ],
+                },
+                "llm_review": {
+                    "approved": False,
+                    "summary": "Same GL both legs.",
+                    "concerns": ["Debit and credit are both GL 2302."],
+                },
                 "explanation": {"reason": ["duplicate of decision"], "decision": "release_prepaid_asset"},
             }
         ],
@@ -249,14 +268,46 @@ def test_org_close_memory_extracts_posting_and_prepaid_status(mock_insert):
     )
 
     row = mock_insert.call_args.args[1]
-    supplier = row["execution_result"]["suppliers"][0]
-    assert supplier["posting"]["same_gl_both_legs"] is True
-    assert supplier["posting"]["debit_account"] == "2302"
-    assert supplier["prepaid_status"]["remaining"] == 4840.0
-    assert "explanation" not in supplier
-    finalize = supplier["execution"]["tool_timeline"][1]
+    item = row["items"][0]
+    assert item["actions"][0]["same_gl_both_legs"] is True
+    assert item["actions"][0]["debit_account"] == "2302"
+    assert item["facts"]["prepaid_status"]["remaining"] == 4840.0
+    assert item["reason"] == ["September slice can be released."]
+    assert item["review"]["approved"] is False
+    assert item["review"]["concerns"] == ["Debit and credit are both GL 2302."]
+    assert item["checks"]["passed"] is False
+    assert "explanation" not in item
+    prepaid_step = item["timeline"][0]
+    assert prepaid_step["reason"] == "check remaining"
+    assert "reason" not in prepaid_step["args"]
+    finalize = item["timeline"][1]
     assert finalize["tool"] == "finalize"
     assert "args" not in finalize
-    assert "1 llm_review rejected" in row["explanation"]["summary"]
-    assert "same debit and credit GL" in row["explanation"]["summary"]
-    assert row["verification_result"]["review_rejected_supplier_ids"] == [TEST_SUPPLIER_IDS[0]]
+    assert finalize["reason"] == "September slice can be released."
+    assert "need attention" in row["summary"]
+    assert "needs_attention" not in row
+    assert row["posted_amount"] == 2420.0
+
+
+@patch("r2r.accounting_agent.memory.supabase_rest.insert")
+def test_skipped_run_writes_memory_row(mock_insert):
+    from r2r.accounting_agent.memory import store_run_memory
+
+    store_run_memory(
+        event={
+            "organization_id": TEST_ORG_ID,
+            "event_type": TEST_EVENT_TYPE,
+            "occurred_at": TEST_OCCURRED_AT,
+        },
+        results=[],
+        skip_reason="Event received outside configured month_start/month_end run window.",
+        request_id="req-skip",
+        task_id="task-skip",
+    )
+
+    row = mock_insert.call_args.args[1]
+    assert row["status"] == "skipped"
+    assert row["item_count"] == 0
+    assert row["title"] == "Month start close skipped"
+    assert "outside configured" in row["summary"]
+    assert row["period_key"] == "2026-09"

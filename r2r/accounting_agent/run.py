@@ -18,7 +18,7 @@ from r2r.accounting_agent.executor import create_default_business_tools
 from r2r.accounting_agent.llm_chat import agent_chat_with_failover, get_last_agent_llm_info, run_llm_review
 from r2r.accounting_agent.loaders import get_accounting_period_context, get_organization_context
 from r2r.accounting_agent.loop import run_accounting_agent
-from r2r.accounting_agent.memory import store_org_close_memory
+from r2r.accounting_agent.memory import store_run_memory
 from r2r.accounting_agent.period_window import build_close_period_window
 from r2r.accounting_agent.prompts import build_context_prompt, build_system_prompt, build_verifier_prompt
 from r2r.accounting_agent.review import generate_explanation, verify_execution
@@ -82,39 +82,76 @@ def _persist_and_package(
     return result
 
 
+def _write_run_memory(
+    event: dict[str, Any],
+    options: dict[str, Any],
+    *,
+    started_at: datetime,
+    results: Optional[list[dict[str, Any]]] = None,
+    accounting_period: dict[str, Any] | None = None,
+    skip_reason: str | None = None,
+) -> None:
+    if options.get("dry_run"):
+        return
+    store_run_memory(
+        event=event,
+        results=results or [],
+        accounting_period=accounting_period,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        request_id=options.get("request_id"),
+        task_id=options.get("task_id"),
+        dry_run=False,
+        skip_reason=skip_reason,
+        trigger_source=str(options.get("trigger_source") or "cron"),
+    )
+
+
 def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     options = options or {}
     dry_run = bool(options.get("dry_run"))
     payload = event.get("payload") or {}
+    started_at = datetime.now(timezone.utc)
 
     if event_has_document_payload(payload) and not event_has_supplier_payload(payload):
         context = build_context(event)
         if not is_event_within_configured_window(event, context["organization_policy"]):
+            message = "Event received outside configured month_start/month_end run window."
+            _write_run_memory(
+                event,
+                options,
+                started_at=started_at,
+                accounting_period=context.get("accounting_period"),
+                skip_reason=message,
+            )
             return {
                 "success": True,
                 "dry_run": dry_run,
                 "skipped": True,
-                "message": "Event received outside configured month_start/month_end run window.",
+                "message": message,
                 "event_type": event["event_type"],
             }
         result = _persist_and_package(event, context, dry_run)
-        if not dry_run:
-            store_org_close_memory(
-                event=event,
-                results=[result],
-                accounting_period=context.get("accounting_period"),
-            )
+        _write_run_memory(
+            event,
+            options,
+            started_at=started_at,
+            results=[result],
+            accounting_period=context.get("accounting_period"),
+        )
         return result
 
     organization_policy = get_organization_context(event["organization_id"])
     if not is_event_within_configured_window(event, organization_policy):
+        message = "Event received outside configured month_start/month_end run window."
+        _write_run_memory(event, options, started_at=started_at, skip_reason=message)
         return {
             "success": True,
             "dry_run": dry_run,
             "skipped": True,
             "org_close_run": True,
             "event_type": event["event_type"],
-            "message": "Event received outside configured month_start/month_end run window.",
+            "message": message,
         }
 
     accounting_period = get_accounting_period_context(event["organization_id"], event["occurred_at"])
@@ -144,6 +181,17 @@ def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[s
     else:
         selected = batches
     if not selected:
+        message = (
+            "No suppliers with POs/PINVs or cost/accrued/prepaid journal activity "
+            "in the current period and previous two periods."
+        )
+        _write_run_memory(
+            event,
+            options,
+            started_at=started_at,
+            accounting_period=accounting_period,
+            skip_reason=message,
+        )
         return {
             "success": True,
             "dry_run": dry_run,
@@ -152,10 +200,7 @@ def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[s
             "event_type": event["event_type"],
             "supplier_count": 0,
             "candidate_count": 0,
-            "message": (
-                "No suppliers with POs/PINVs or cost/accrued/prepaid journal activity "
-                "in the current period and previous two periods."
-            ),
+            "message": message,
         }
 
     results = []
@@ -178,12 +223,13 @@ def execute_accounting_agent_run(event: dict[str, Any], options: Optional[dict[s
         if index < len(selected) - 1 and SUPPLIER_RUN_GAP_SECONDS > 0:
             time.sleep(SUPPLIER_RUN_GAP_SECONDS)
 
-    if not dry_run:
-        store_org_close_memory(
-            event=event,
-            results=results,
-            accounting_period=accounting_period,
-        )
+    _write_run_memory(
+        event,
+        options,
+        started_at=started_at,
+        results=results,
+        accounting_period=accounting_period,
+    )
 
     return {
         "success": all(r.get("success") is not False for r in results),

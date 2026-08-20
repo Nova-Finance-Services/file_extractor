@@ -70,7 +70,10 @@ def process_accounting_agent_job(self, payload: dict):
         job.get("organization_id"),
         job.get("event_type"),
     )
-    result = run_accounting_agent_job(payload)
+    result = run_accounting_agent_job({
+        **payload,
+        "task_id": self.request.id,
+    })
     return {
         "status": "ok",
         "task_id": self.request.id,
@@ -100,7 +103,10 @@ def process_accounting_agent_jobs(self, payload: dict):
         request_id,
         len(jobs),
     )
-    summary = run_accounting_agent_jobs(payload)
+    summary = run_accounting_agent_jobs({
+        **payload,
+        "task_id": self.request.id,
+    })
     return {
         "status": "ok",
         "task_id": self.request.id,

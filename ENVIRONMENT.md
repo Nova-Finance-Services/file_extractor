@@ -119,7 +119,7 @@ These appear in Nova Edge / cron, or were leftover in older Python config. They 
 | `ACCOUNTING_AGENT_FLASK_URL` | Nova Edge (optional) | Dedicated override; falls back to `FILE_EXTRACTOR_URL`. |
 | `ACCOUNTING_AGENT_FLASK_API_KEY` | Nova Edge (optional) | Dedicated override; falls back to `FILE_EXTRACTOR_API_KEY`. |
 | `ENVIRONMENT` | Nova Edge | `dev` or `prod`. Sent to Flask in the JSON body as `environment`, not read from Flask env. |
-| `CRON_SECRET` | Nova Edge | Auth for `r2r-accounting-agent` / cron functions. Flask uses `FILE_EXTRACTOR_KEY` instead. |
+| `CRON_SECRET` | Nova Edge | Auth for `r2r-accounting-agent-cron`. Flask uses `FILE_EXTRACTOR_KEY` instead. |
 | `PYTHON_VERSION` | Render `render.yaml` | Build-time Python version (`3.11.0`). Not read by app code. |
 
 ---

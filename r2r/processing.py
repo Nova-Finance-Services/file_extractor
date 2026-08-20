@@ -26,7 +26,12 @@ def _validate_job(job: Any, index: int | None = None) -> str | None:
     return None
 
 
-def _run_one_job(job: dict[str, Any]) -> dict[str, Any]:
+def _run_one_job(
+    job: dict[str, Any],
+    *,
+    request_id: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     job = normalize_accounting_agent_job(job)
     event: dict[str, Any] = {
         "event_type": str(job["event_type"]).strip(),
@@ -38,7 +43,12 @@ def _run_one_job(job: dict[str, Any]) -> dict[str, Any]:
     if isinstance(job.get("payload"), dict) and job["payload"]:
         event["payload"] = job["payload"]
 
-    result = execute_accounting_agent_run(event, {"dry_run": bool(job.get("dry_run"))})
+    result = execute_accounting_agent_run(event, {
+        "dry_run": bool(job.get("dry_run")),
+        "request_id": request_id,
+        "task_id": task_id,
+        "trigger_source": "cron",
+    })
     return {
         "organization_id": event["organization_id"],
         "event_type": event["event_type"],
@@ -69,7 +79,11 @@ def run_accounting_agent_job(payload: dict[str, Any]) -> dict[str, Any]:
         job.get("organization_id"),
         job.get("event_type"),
     )
-    result = _run_one_job(job)
+    result = _run_one_job(
+        job,
+        request_id=request_id,
+        task_id=payload.get("task_id"),
+    )
     logger.info(
         "accounting agent done request_id=%s org=%s event_type=%s success=%s",
         request_id,
@@ -113,7 +127,11 @@ def run_accounting_agent_jobs(payload: dict[str, Any]) -> dict[str, Any]:
             results.append({"index": index, "success": False, "error": validation_error})
             continue
         try:
-            result = _run_one_job(job)
+            result = _run_one_job(
+                job,
+                request_id=request_id,
+                task_id=payload.get("task_id"),
+            )
             results.append(result)
         except Exception as exc:
             error_message = str(exc)

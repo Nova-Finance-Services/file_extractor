@@ -177,7 +177,7 @@ def get_historical_context(event: dict[str, Any]) -> dict[str, Any]:
     try:
         rows = supabase_rest.select(
             "agent_memory",
-            columns="decision_type",
+            columns="decision_types",
             filters={
                 "agent_name": ACCOUNTING_AGENT_NAME,
                 "organization_id": event["organization_id"],
@@ -190,9 +190,10 @@ def get_historical_context(event: dict[str, Any]) -> dict[str, Any]:
         return {"similar_decisions_count": 0}
     if not rows:
         return {"similar_decisions_count": 0}
+    last_types = rows[0].get("decision_types") or []
     return {
         "similar_decisions_count": len(rows),
-        "last_decision": rows[0].get("decision_type"),
+        "last_decision": last_types[0] if last_types else None,
     }
 
 
