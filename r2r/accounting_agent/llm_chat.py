@@ -119,18 +119,31 @@ def parse_responses_output(response: Any) -> dict[str, Any]:
 
 
 def _call_openai(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str) -> dict[str, Any]:
-    # gpt-5.6-sol supports function tools + reasoning on the Responses API, not chat.completions.
+    # Use /v1/responses over HTTP so gpt-5.6-sol can combine reasoning + function
+    # tools. openai==1.55.3 has no client.responses; chat.completions rejects this combo.
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
     instructions, input_items = messages_to_responses_input(messages)
-    kwargs: dict[str, Any] = {
+    body: dict[str, Any] = {
         "model": model,
         "input": input_items,
         "tools": _responses_tools(tools),
         "tool_choice": "auto",
     }
     if instructions:
-        kwargs["instructions"] = instructions
-    response = _openai().with_options(timeout=180).responses.create(**kwargs)
-    return parse_responses_output(response)
+        body["instructions"] = instructions
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=180,
+    )
+    if not response.ok:
+        raise RuntimeError(f"OpenAI responses {response.status_code}: {response.text[:400]}")
+    return parse_responses_output(response.json())
 
 
 def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
